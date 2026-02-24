@@ -1,0 +1,29 @@
+# Python
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.egg-info/
+checkpoints/
+.DS_Store
+
+# C# / .NET
+bin/
+obj/
+
+# VS Code
+.vscode/
+
+# JavaScript / web
+web/node_modules/
+web/dist/
+
+# Rust
+rust/target/
+rust/target_local/
+rust/target_server_local/
+rust/target_wasm_local/
+rust/wasm-ui/dist_local/

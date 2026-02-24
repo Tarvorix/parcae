@@ -1,0 +1,72 @@
+Parcae Strategy
+
+Ludus Latrunculorum Historical Reconstruction:
+
+Core Mechanics: The Universals and the Consensus
+Before delving into specific divergent reconstructions, we must establish the "agreed-upon" mechanics that form the core of Ludus Latrunculorum. These are the non-negotiables derived from the intersection of literary and archaeological evidence. Any valid reconstruction must adhere to these foundational principles.
+1. The Geometry of the Grid
+The game is played on a grid of squares. Unlike Alquerque or modern Morris games, movement is on the spaces, not the intersections. The board is rectangular or square. The grid dictates the logic of movement and capture, creating a discrete space where adjacency is key.
+2. Orthogonal Movement
+By universal consensus among scholars (Bell, Schädler, Kowalski), pieces move orthogonally (horizontally or vertically), like the Rook in Chess. Diagonal movement is almost never proposed, as it contradicts the "phalanx" and "line" descriptions in the texts. The range of movement is generally considered unlimited (any number of squares), though some older reconstructions proposed single-step movement. The unlimited movement allows for the "long-range" tactics described in the Laus Pisonis, where a piece comes from a distance to strike.
+3. Custodial Capture
+This is the defining mechanic of the game. A piece is captured not by landing on it, but by surrounding it on two opposite sides (rank or file) with two of one's own pieces.
+* Example: If a Black piece is at B2, and White moves pieces to B1 and B3, the Black piece is captured.
+* Suicide Rule: A piece may voluntarily move between two enemy pieces without being captured. Capture is an active event caused by the aggressor's move, not a passive state of being. This distinction allows for daring infiltrations and sacrifices.
+4. The Goal
+The goal is attrition or immobilization. The winner is the player who captures the most pieces (Seneca's "one man ahead") or renders the opponent unable to move (Incitus). The dual nature of victory—destroy the army or paralyze it—adds strategic variety. Players can choose to play aggressively for captures or positionally for a blockade.
+
+
+The Kowalski Model (The Stanway Hybrid) - The Strategic Wargame
+This reconstruction, synthesized by Wladyslaw Kowalski and bolstered by the specific archaeological evidence from the "Doctor's Grave" at Stanway, represents the most complex and strategically deep version of the game. It is favored by wargamers because it simulates the grand tactical movements of a Roman legion—deployment, formation, and encirclement—rather than a simple skirmish.
+7.1 Equipment
+* Board: A rectangular grid of 12x8 squares (12 files wide, 8 ranks deep). This specific size is based on the metal corner fittings found at the Stanway burial site and the Colchester board.
+* Notation for Examples: Files are lettered A-L (Left to Right). Ranks are numbered 1-8 (Bottom to Top).
+* Pieces:
+* 12 Soldiers (Milites) per player (Standard pieces).
+* 1 Dux (General) per player (A distinct piece; colored differently or slightly larger).
+* Note: The Stanway grave contained 13 glass counters per side (13 Blue, 13 White). This perfectly fits the 12 Soldiers + 1 Dux composition.
+7.2 Setup: The Stanway Deployment
+While Kowalski originally proposed a back-rank setup similar to Chess, the "Stanway Hybrid" utilizes the arrangement suggested by the physical position of the pieces found in the Doctor's Grave. The pieces were found lined up along the long edges of the board.
+The Formation:
+* White Army: Occupies the entire Row 1 (A1 to L1). The Dux is placed at F1 or G1 (center), or in a second rank behind the center if preferred, but the single-line deployment allows for a "phalanx" advance.
+* Blue/Black Army: Occupies the entire Row 8 (A8 to L8). The Dux is placed opposite the enemy Dux.
+Visualizing the Start:
+   A B C D E F G H I J K L 8  <-- Blue Army (D = Dux) 7 . . . . . . . . . . . . 6 . . . . . . . . . . . . 5 . . . . . . . . . . . . 4 . . . . . . . . . . . . 3 . . . . . . . . . . . . 2 . . . . . . . . . . . . 1  <-- White Army 
+Note: This "Line vs. Line" setup forces players to advance and fight for the center, simulating the clash of infantry lines.
+7.3 Movement Mechanics
+The movement rules in this variant are designed to facilitate long-range tactics and the rapid redeployment of forces described in the Laus Pisonis ("coming from a distant retreat").
+1. The Rook Move: All pieces—Soldiers and the Dux—move like the Rook in Chess. They can slide any number of squares orthogonally (horizontally or vertically) as long as the path is unobstructed.
+2. No Jumping: Pieces cannot jump over other pieces.
+3. No Diagonals: Movement is strictly orthogonal.
+4. The "Suicide" Move: A piece may voluntarily move into a square between two enemy pieces. It is not captured in this case. Capture requires the active move of an opponent to close the trap.
+* Why do this? To block an enemy line, to bait a trap, or to threaten the enemy Dux.
+7.4 Combat Rules: The Art of the Trap
+Captures are executed via Custodial Capture (sandwiching). The Kowalski/Stanway rules introduce specific variations that increase lethality and tactical options.
+A. Standard Custodial Capture: If a player moves a piece such that an enemy piece is trapped between the moved piece and another friendly piece on the same rank or file, the enemy piece is removed.
+B. Multiple Captures (The "Combo"): A single move can trigger multiple captures if the moving piece completes traps in different directions simultaneously.
+* Example: A piece moves between two enemies. One enemy is to the Left (and blocked by a friend further Left). The other is to the Right (and blocked by a friend further Right). Both enemies are captured.
+C. Corner Capture: A piece in the corner (e.g., A1) is captured if the opponent blocks the two orthogonal squares adjacent to it (e.g., A2 and B1). The corner itself acts as the "anvil" for the hammer.
+D. The Dux Invulnerability: The Dux cannot be captured or removed from the board. Encircling the Dux does not kill it; it immobilizes it (see Victory Conditions).
+7.5 Illustrated Tactical Examples
+Example 1: The Standard Pincer (Basic Capture) Situation: White has a Soldier at C4. Black has a Soldier at C6. Move: White moves a Soldier from E6 to B6. Result: No capture yet. Correct Move: White moves a Soldier to C5? No. Correct Move: White moves a Soldier to C7.
+* Diagram:   C 6  <-- Black Soldier 5  ^ 4  <-- White Soldier (Anvil) Action: White moves a second piece to C7 (The Hammer).   C 7  <-- White Moves Here 6  <-- TRAPPED 5 | 4 Result: The Black piece at C6 is removed.
+Example 2: The Double Strike (Multiple Capture) Situation: Black pieces are at D5 and F5. White has pieces at C5 and G5.
+* Diagram (Before Move):   C   D   E   F   G 5 .   
+Move: White moves a Soldier to E5.
+* Diagram (After Move):   C   D   E   F   G 5        ^   ^     Trap 1  Trap 2  
+Result: The White piece at E5 simultaneously traps the Black piece at D5 (against C5) and the Black piece at F5 (against G5). Both Black pieces are removed. This illustrates the "devastating combo" potential.
+Example 3: Storming the Corner Situation: Black Dux is hiding in the corner at A1.
+* Diagram:   A   B 2 .  .  
+1 . ``` Move: White moves pieces to A2 and B1.
+* Diagram:   A   B 2 . 1  
+Result: If was a normal soldier, it would be dead. Since it is the Dux, it is now Immobilized (if it cannot move). If this is the final state, White wins (see Victory Conditions).
+Example 4: The "Mandra" (Defensive Wall) Situation: Black forms a 2x2 block of soldiers. ```
+``` Analysis: This formation is invulnerable to standard capture because no single piece has an "opposite side" open for an enemy to occupy. White must flank this structure and force Black to break it due to Zugzwang (compulsion to move).
+7.6 Victory Conditions
+1. Primary Victory (Checkmate): The game is won immediately by Immobilizing the Enemy Dux.
+* The Dux is immobilized if it is surrounded on all 4 orthogonal sides by enemy pieces (or friendly pieces that cannot move), or pinned against the edge/corner such that it has zero legal moves.
+* This mirrors the Roman military concept of capturing the enemy commander alive.
+1. Secondary Victory (Material Superiority):
+* If the game reaches a stalemate or a set number of moves (e.g., 30 moves) without a capture, the game ends.
+* Players count their remaining pieces.
+* The player with the most pieces wins ("I am one man ahead").

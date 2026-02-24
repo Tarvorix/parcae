@@ -1,0 +1,107 @@
+.board-wrapper {
+  display: inline-block;
+  background: linear-gradient(135deg, #10131a, #1b2332);
+  padding: 12px;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.board {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 24px repeat(12, minmax(36px, 1fr));
+  gap: 2px;
+}
+
+.cell {
+  position: relative;
+  padding: 0;
+  height: 50px;
+  border: none;
+  cursor: pointer;
+  font-size: 20px;
+  font-family: "Roboto Condensed", system-ui, -apple-system, sans-serif;
+  color: #e7edf7;
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+
+.cell:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+}
+
+.cell.light {
+  background: #d0d7e2;
+}
+
+.cell.dark {
+  background: #66738b;
+}
+
+.cell.selected {
+  outline: 3px solid #ffad33;
+}
+
+.cell.legal {
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.5);
+}
+
+.coord {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.35);
+}
+
+.piece {
+  display: inline-block;
+  width: 100%;
+  text-align: center;
+}
+
+.piece.white {
+  color: #102542;
+}
+
+.piece.black {
+  color: #0f172a;
+}
+
+.rank-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #e7edf7;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.file-row {
+  display: grid;
+  grid-template-columns: 24px repeat(12, minmax(36px, 1fr));
+  gap: 2px;
+  margin-top: 6px;
+  color: #e7edf7;
+  font-weight: 700;
+}
+
+.file-spacer {
+  height: 20px;
+}
+
+.file-label {
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .cell {
+    height: 36px;
+    font-size: 16px;
+  }
+}

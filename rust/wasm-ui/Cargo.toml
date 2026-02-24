@@ -1,0 +1,24 @@
+[package]
+name = "wasm-ui"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+yew = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+gloo-net = { workspace = true }
+engine = { path = "../engine" }
+ai = { path = "../ai", default-features = false }
+serde_with = { workspace = true }
+web-sys = { workspace = true }
+wasm-logger = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }

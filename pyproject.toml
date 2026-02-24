@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "parcaestrategy"
+version = "0.1.0"
+description = "ParcaeStrategy multi-language scaffold (Python + C#)"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{name = "Your Name"}]
+
+[project.dependencies]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "httpx",
+    "fastapi",
+    "uvicorn",
+    "torch",
+]
+api = ["fastapi", "uvicorn"]
+ai = ["torch"]
+mcp = ["mcp", "httpx"]
+
+[project.scripts]
+parcaestrategy = "parcaestrategy.cli:main"
+parcaestrategy-mcp = "parcaestrategy.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,24 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+
+[dependencies]
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+engine = { path = "../engine" }
+ai = { path = "../ai", default-features = false, features = ["onnx"] }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
