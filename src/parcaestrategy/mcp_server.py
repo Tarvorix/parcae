@@ -6,6 +6,8 @@ participant against a human player or built-in AI.
 from __future__ import annotations
 
 import os
+import socket
+import threading
 from typing import Any, Dict, Optional
 
 import httpx
@@ -13,6 +15,8 @@ from mcp.server.fastmcp import FastMCP
 
 API_BASE = os.getenv("PARCAE_API_URL", "http://127.0.0.1:8000").rstrip("/")
 VALID_MODES = {"pva", "pvg", "gvg", "gva", "ava"}
+AGENT_ID = os.getenv("PARCAE_AGENT_ID", f"mcp-{socket.gethostname()}-{os.getpid()}")
+HEARTBEAT_SECONDS = max(2, int(os.getenv("PARCAE_AGENT_HEARTBEAT_SECONDS", "5")))
 
 mcp = FastMCP("parcae-strategy")
 
@@ -44,14 +48,19 @@ def health() -> Dict[str, Any]:
 @mcp.tool(
     description=(
         "Create a match. Modes: pva (player vs ai), pvg (player vs agent), "
-        "gvg (agent vs agent), gva (agent vs ai), ava (ai vs ai)."
+        "gvg (agent vs agent), gva (agent vs ai), ava (ai vs ai). "
+        "Optionally pass ai_profiles to select ai backend per side "
+        "(heuristic|centurion|alphazero)."
     )
 )
-def create_match(mode: str = "pvg") -> Dict[str, Any]:
+def create_match(mode: str = "pvg", ai_profiles: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     mode = mode.lower().strip()
     if mode not in VALID_MODES:
         raise ValueError(f"Unsupported mode '{mode}'. Valid modes: {sorted(VALID_MODES)}")
-    return _request("POST", "/match", json={"mode": mode})
+    payload: Dict[str, Any] = {"mode": mode}
+    if ai_profiles is not None:
+        payload["ai_profiles"] = ai_profiles
+    return _request("POST", "/match", json=payload)
 
 
 @mcp.tool(description="Fetch the current state of a match by id.")
@@ -84,8 +93,32 @@ def step_ai(match_id: str) -> Dict[str, Any]:
     return _request("POST", f"/match/{match_id}/ai-step")
 
 
+def _heartbeat_loop(stop_event: threading.Event) -> None:
+    with httpx.Client(timeout=5.0) as client:
+        while not stop_event.is_set():
+            try:
+                client.post(
+                    f"{API_BASE}/agent/heartbeat",
+                    json={"agent_id": AGENT_ID},
+                )
+            except Exception:
+                pass
+            stop_event.wait(HEARTBEAT_SECONDS)
+
+
 def main() -> None:
-    mcp.run()
+    stop_event = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop,
+        args=(stop_event,),
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        mcp.run()
+    finally:
+        stop_event.set()
+        heartbeat_thread.join(timeout=1.0)
 
 
 if __name__ == "__main__":

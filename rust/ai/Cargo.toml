@@ -11,6 +11,8 @@ anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 rand = { workspace = true }
+bincode = { workspace = true }
+rayon = { workspace = true }
 ort = { workspace = true, optional = true }
 thiserror = { workspace = true }
 once_cell = { workspace = true }

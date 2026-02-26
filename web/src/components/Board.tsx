@@ -15,7 +15,7 @@ function pieceGlyph(piece: Piece | undefined): string {
   if (piece.kind === "dux") {
     return piece.color === "white" ? "♔" : "♚";
   }
-  return piece.color === "white" ? "⛂" : "⛀";
+  return piece.color === "white" ? "⛀" : "⛂";
 }
 
 export const Board: React.FC<Props> = ({

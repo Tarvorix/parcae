@@ -27,6 +27,8 @@ futures-util = "0.3"
 parking_lot = "0.12"
 dashmap = "6"
 rand = "0.8"
+bincode = "1.3"
+rayon = "1.10"
 ort = { version = "2.0.0-rc.10", default-features = false, features = ["load-dynamic", "ndarray"] }
 once_cell = "1.19"
 tracing = "0.1"

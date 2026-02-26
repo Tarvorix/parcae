@@ -308,7 +308,7 @@ fn determine_winner(
 ) -> (Option<Color>, Option<String>) {
     let opponent = mover.opponent();
     if let Some(opponent_dux) = find_piece(board, opponent, PieceType::Dux) {
-        if !piece_has_legal_moves(board, opponent_dux) {
+        if dux_immobilized_by_enemy(board, opponent_dux, mover) {
             return (
                 Some(mover),
                 Some("Opponent Dux immobilized.".to_string()),
@@ -339,12 +339,23 @@ fn determine_winner(
     (None, None)
 }
 
-fn piece_has_legal_moves(board: &HashMap<Coord, Piece>, origin: Coord) -> bool {
-    let dummy = GameState {
-        board: board.clone(),
-        ..GameState::default()
-    };
-    !legal_moves(&dummy, origin).is_empty()
+fn dux_immobilized_by_enemy(board: &HashMap<Coord, Piece>, dux: Coord, enemy: Color) -> bool {
+    // A Dux is considered immobilized for victory only when every orthogonal
+    // adjacency is either board edge or occupied by an enemy piece.
+    // Friendly blockers do not count as an immobilization victory.
+    for (dx, dy) in DIRECTIONS {
+        let nx = dux.0 as i16 + dx as i16;
+        let ny = dux.1 as i16 + dy as i16;
+        if nx < 0 || ny < 0 || nx >= BOARD_WIDTH as i16 || ny >= BOARD_HEIGHT as i16 {
+            continue;
+        }
+        let adj = (nx as u8, ny as u8);
+        match board.get(&adj) {
+            Some(p) if p.color == enemy => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 pub fn any_legal_moves(board: &HashMap<Coord, Piece>, color: Color) -> bool {
@@ -539,5 +550,13 @@ mod tests {
         let result = apply_move(&state, Move { origin: (0, 2), target: (0, 1) }).unwrap();
         assert_eq!(result.winner, Some(Color::White));
         assert!(result.summary.as_ref().unwrap().contains("Dux"));
+    }
+
+    #[test]
+    fn dux_blocked_by_own_side_is_not_immobilization_loss() {
+        let state = initial_state(5).unwrap();
+        let result = apply_move(&state, Move { origin: (5, 0), target: (5, 6) }).unwrap();
+        assert_eq!(result.winner, None);
+        assert_eq!(result.turn, Color::Black);
     }
 }

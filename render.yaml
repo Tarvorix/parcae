@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: parcae-api
+    runtime: rust
+    plan: free
+    buildCommand: cd rust && cargo build --release -p server
+    startCommand: cd rust && ./target/release/server
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PARCAE_AI_DEFAULT_BACKEND
+        value: centurion
+      - key: PARCAE_STOCKFISH_DEFAULT_TIME_MS
+        value: 500
+      - key: PARCAE_STOCKFISH_DEFAULT_HASH_MB
+        value: 128
+      - key: PARCAE_MODEL_PATH
+        value: /opt/render/project/src/models/rust/parcae_model.onnx
+      - key: PARCAE_BOOK_PATH
+        value: /opt/render/project/src/models/rust/book/centurion_book_v1.bin
+      - key: PARCAE_TB_PATH
+        value: /opt/render/project/src/models/rust/tablebases/centurion_tb_4pc_v1.bin
+      - key: PARCAE_NNUE_PATH
+        value: /opt/render/project/src/models/rust/nnue/centurion_nnue_v1.bin
+
+  - type: web
+    name: parcae-web
+    runtime: static
+    plan: free
+    buildCommand: cd web && npm ci && npm run build
+    staticPublishPath: ./web/dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: parcae-api
+          envVarKey: RENDER_EXTERNAL_URL

@@ -1,4 +1,4 @@
-use ai::AIAgent;
+use ai::{AIAgent, AiCapabilities, AiMoveMeta, AiProfile};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -13,10 +13,14 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 use uuid::Uuid;
+
+const AGENT_STALE_AFTER_SECS: u64 = 15;
+const AGENT_PRUNE_AFTER_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -40,6 +44,8 @@ enum Controller {
 struct CreateMatchRequest {
     #[serde(default = "default_mode")]
     mode: MatchMode,
+    #[serde(default)]
+    ai_profiles: MatchAiProfiles,
 }
 
 fn default_mode() -> MatchMode {
@@ -52,12 +58,32 @@ struct MoveRequest {
     target: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct MatchAiProfiles {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    white: Option<AiProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    black: Option<AiProfile>,
+}
+
+impl MatchAiProfiles {
+    fn for_color(&self, color: Color) -> Option<&AiProfile> {
+        match color {
+            Color::White => self.white.as_ref(),
+            Color::Black => self.black.as_ref(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MatchResponse {
     id: String,
     mode: MatchMode,
     players: Players,
     state: SerializedState,
+    ai_profiles: MatchAiProfiles,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_ai_meta: Option<AiMoveMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,37 +120,70 @@ struct LegalMovesResponse {
     moves: Vec<LegalMoveResponse>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentHeartbeatRequest {
+    #[serde(default = "default_agent_id")]
+    agent_id: String,
+}
+
+fn default_agent_id() -> String {
+    "default-agent".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentStatusEntry {
+    agent_id: String,
+    connected: bool,
+    last_seen_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentStatusResponse {
+    connected: bool,
+    active_count: usize,
+    stale_after_seconds: u64,
+    agents: Vec<AgentStatusEntry>,
+}
+
 #[derive(Debug)]
 struct MatchEntry {
     mode: MatchMode,
     players: Players,
     state: Mutex<GameState>,
+    ai_profiles: MatchAiProfiles,
+    last_ai_meta: Mutex<Option<AiMoveMeta>>,
 }
 
 #[derive(Clone)]
 struct AppState {
     matches: Arc<dashmap::DashMap<String, Arc<MatchEntry>>>,
     hub: Arc<dashmap::DashMap<String, broadcast::Sender<MatchResponse>>>,
+    agents: Arc<dashmap::DashMap<String, i64>>,
     ai: Arc<AIAgent>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let ai_model_path = std::env::var("PARCAE_MODEL_PATH")
-        .unwrap_or_else(|_| "models/rust/parcae_model.onnx".into());
-    let ai = Arc::new(AIAgent::new(Some(std::path::PathBuf::from(ai_model_path)), 64, 1.25));
+    let ai_model_path = std::env::var("PARCAE_MODEL_PATH").ok().map(std::path::PathBuf::from);
+    let ai = Arc::new(AIAgent::new(
+        ai_model_path,
+        64,
+        1.25,
+    ));
     let state = AppState {
         matches: Arc::new(dashmap::DashMap::new()),
         hub: Arc::new(dashmap::DashMap::new()),
+        agents: Arc::new(dashmap::DashMap::new()),
         ai,
     };
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/ai/capabilities", get(ai_capabilities))
+        .route("/agent/status", get(agent_status))
+        .route("/agent/heartbeat", post(agent_heartbeat))
         .route("/match", post(create_match))
         .route("/match/:id", get(get_match))
         .route("/match/:id/legal", get(get_legal))
@@ -145,14 +204,79 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .unwrap_or(8000);
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
-    info!("Starting server on http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    info!("Starting server on http://{addr}");
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
 }
 
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({"status": "ok"}))
+}
+
+async fn ai_capabilities(State(app): State<AppState>) -> impl IntoResponse {
+    let caps: AiCapabilities = app.ai.capabilities();
+    Json(caps)
+}
+
+fn now_unix_ms() -> i64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(delta) => delta.as_millis() as i64,
+        Err(_) => 0,
+    }
+}
+
+fn build_agent_status(app: &AppState) -> AgentStatusResponse {
+    let now = now_unix_ms();
+    let stale_window = Duration::from_secs(AGENT_STALE_AFTER_SECS).as_millis() as i64;
+    let prune_window = Duration::from_secs(AGENT_PRUNE_AFTER_SECS).as_millis() as i64;
+    let mut stale_ids = Vec::new();
+    let mut agents = Vec::new();
+
+    for entry in app.agents.iter() {
+        let agent_id = entry.key().clone();
+        let last_seen = *entry.value();
+        let age_ms = now.saturating_sub(last_seen);
+        if age_ms > prune_window {
+            stale_ids.push(agent_id.clone());
+        }
+        agents.push(AgentStatusEntry {
+            agent_id,
+            connected: age_ms <= stale_window,
+            last_seen_unix_ms: last_seen,
+        });
+    }
+
+    for stale in stale_ids {
+        app.agents.remove(&stale);
+    }
+
+    agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    let active_count = agents.iter().filter(|a| a.connected).count();
+    AgentStatusResponse {
+        connected: active_count > 0,
+        active_count,
+        stale_after_seconds: AGENT_STALE_AFTER_SECS,
+        agents,
+    }
+}
+
+async fn agent_status(State(app): State<AppState>) -> impl IntoResponse {
+    Json(build_agent_status(&app))
+}
+
+async fn agent_heartbeat(
+    State(app): State<AppState>,
+    Json(req): Json<AgentHeartbeatRequest>,
+) -> impl IntoResponse {
+    let trimmed = req.agent_id.trim();
+    let agent_id = if trimmed.is_empty() {
+        default_agent_id()
+    } else {
+        trimmed.to_string()
+    };
+    app.agents.insert(agent_id, now_unix_ms());
+    Json(build_agent_status(&app))
 }
 
 async fn create_match(
@@ -162,10 +286,11 @@ async fn create_match(
     let id = Uuid::new_v4().to_string()[..8].to_string();
     let mut state = initial_state(5).map_err(|e| ApiError::bad_request(e.to_string()))?;
     let players = players_for_mode(&req.mode);
+    let ai_profiles = effective_ai_profiles(&players, req.ai_profiles, &app.ai.default_profile());
 
-    // For AI vs AI, make an opening ply so spectators can watch.
+    let mut last_ai_meta = None;
     if req.mode == MatchMode::Ava {
-        run_ai_turns(&app.ai, &mut state, ai_colors(&players), Some(1))
+        last_ai_meta = run_ai_turns(&app.ai, &mut state, &ai_profiles, Some(1))
             .map_err(|e| ApiError::server(e.to_string()))?;
     }
 
@@ -173,6 +298,8 @@ async fn create_match(
         mode: req.mode.clone(),
         players: players.clone(),
         state: Mutex::new(state),
+        ai_profiles: ai_profiles.clone(),
+        last_ai_meta: Mutex::new(last_ai_meta),
     });
     app.matches.insert(id.clone(), entry);
     let payload = serialize_match(&id, &app);
@@ -251,20 +378,26 @@ async fn play_move(
         .matches
         .get(&id)
         .ok_or_else(|| ApiError::not_found("match not found"))?;
-    let mut state = entry.state.lock();
-    if state.winner.is_some() {
-        return Err(ApiError::bad_request("Match already finished"));
-    }
-    let origin = engine::notation_to_coord(&body.origin)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let target = engine::notation_to_coord(&body.target)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let mv = Move { origin, target };
-    let next = apply_move(&state, mv).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    *state = next;
+    let latest_meta = {
+        let mut state = entry.state.lock();
+        if state.winner.is_some() {
+            return Err(ApiError::bad_request("Match already finished"));
+        }
+        let origin = engine::notation_to_coord(&body.origin)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let target = engine::notation_to_coord(&body.target)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let mv = Move { origin, target };
+        let next = apply_move(&state, mv).map_err(|e| ApiError::bad_request(e.to_string()))?;
+        *state = next;
 
-    run_ai_turns(&app.ai, &mut state, ai_colors(&entry.players), None)
-        .map_err(|e| ApiError::server(e.to_string()))?;
+        run_ai_turns(&app.ai, &mut state, &entry.ai_profiles, None)
+            .map_err(|e| ApiError::server(e.to_string()))?
+    };
+
+    if let Some(meta) = latest_meta {
+        *entry.last_ai_meta.lock() = Some(meta);
+    }
 
     let payload = serialize_match(&id, &app);
     broadcast_match(&app, &id, &payload);
@@ -279,13 +412,23 @@ async fn step_ai(
         .matches
         .get(&id)
         .ok_or_else(|| ApiError::not_found("match not found"))?;
-    let mut state = entry.state.lock();
-    let ai_sides = ai_colors(&entry.players);
-    if !ai_sides.contains(&state.turn) {
-        return Err(ApiError::bad_request("No AI is configured for the current turn"));
+    let latest_meta = {
+        let mut state = entry.state.lock();
+
+        if entry.ai_profiles.for_color(state.turn).is_none() {
+            return Err(ApiError::bad_request(
+                "No AI is configured for the current turn",
+            ));
+        }
+
+        run_ai_turns(&app.ai, &mut state, &entry.ai_profiles, Some(1))
+            .map_err(|e| ApiError::server(e.to_string()))?
+    };
+
+    if let Some(meta) = latest_meta {
+        *entry.last_ai_meta.lock() = Some(meta);
     }
-    run_ai_turns(&app.ai, &mut state, ai_sides, Some(1))
-        .map_err(|e| ApiError::server(e.to_string()))?;
+
     let payload = serialize_match(&id, &app);
     broadcast_match(&app, &id, &payload);
     Ok(Json(payload))
@@ -305,9 +448,7 @@ async fn handle_ws(app: AppState, id: String, socket: axum::extract::ws::WebSock
     let rx = {
         let entry = app.matches.get(&id);
         if entry.is_none() {
-            let _ = sender
-                .send(Message::Text("match not found".into()))
-                .await;
+            let _ = sender.send(Message::Text("match not found".into())).await;
             return;
         }
         let hub = app
@@ -319,7 +460,6 @@ async fn handle_ws(app: AppState, id: String, socket: axum::extract::ws::WebSock
             })
             .clone();
         let rx = hub.subscribe();
-        // Send current state once.
         let payload = serialize_match(&id, &app);
         let _ = sender
             .send(Message::Text(serde_json::to_string(&payload).unwrap()))
@@ -329,18 +469,13 @@ async fn handle_ws(app: AppState, id: String, socket: axum::extract::ws::WebSock
 
     let mut send_task = tokio::spawn(async move {
         let mut rx = rx;
-        loop {
-            match rx.recv().await {
-                Ok(payload) => {
-                    if sender
-                        .send(Message::Text(serde_json::to_string(&payload).unwrap()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(_) => break,
+        while let Ok(payload) = rx.recv().await {
+            if sender
+                .send(Message::Text(serde_json::to_string(&payload).unwrap()))
+                .await
+                .is_err()
+            {
+                break;
             }
         }
     });
@@ -384,43 +519,61 @@ fn players_for_mode(mode: &MatchMode) -> Players {
     }
 }
 
-fn ai_colors(players: &Players) -> Vec<Color> {
-    let mut sides = Vec::new();
+fn effective_ai_profiles(
+    players: &Players,
+    requested: MatchAiProfiles,
+    default_profile: &AiProfile,
+) -> MatchAiProfiles {
+    let mut out = MatchAiProfiles::default();
+
     if players.white == Controller::Ai {
-        sides.push(Color::White);
+        out.white = Some(requested.white.unwrap_or_else(|| default_profile.clone()));
     }
     if players.black == Controller::Ai {
-        sides.push(Color::Black);
+        out.black = Some(requested.black.unwrap_or_else(|| default_profile.clone()));
     }
-    sides
+
+    out
 }
 
 fn run_ai_turns(
     ai: &AIAgent,
     state: &mut GameState,
-    ai_colors: Vec<Color>,
+    ai_profiles: &MatchAiProfiles,
     max_plies: Option<usize>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<AiMoveMeta>> {
     let mut plies = 0usize;
-    while state.active() && ai_colors.contains(&state.turn) {
+    let mut latest_meta: Option<AiMoveMeta> = None;
+
+    while state.active() {
         if let Some(limit) = max_plies {
             if plies >= limit {
                 break;
             }
         }
-        let mv = ai
-            .select_move(state)
+
+        let Some(profile) = ai_profiles.for_color(state.turn) else {
+            break;
+        };
+
+        let selection = ai
+            .select_move_with_profile(state, profile)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let Some(mv) = mv else {
+
+        latest_meta = Some(selection.meta.clone());
+
+        let Some(mv) = selection.mv else {
             state.winner = Some(state.turn.opponent());
             state.summary = Some("AI has no legal moves.".into());
             break;
         };
+
         let next = apply_move(state, mv)?;
         *state = next;
         plies += 1;
     }
-    Ok(())
+
+    Ok(latest_meta)
 }
 
 fn serialize_match(id: &str, app: &AppState) -> MatchResponse {
@@ -431,14 +584,19 @@ fn serialize_match(id: &str, app: &AppState) -> MatchResponse {
             mode: entry.mode.clone(),
             players: entry.players.clone(),
             state: serialize_state(&state),
+            ai_profiles: entry.ai_profiles.clone(),
+            last_ai_meta: entry.last_ai_meta.lock().clone(),
         };
     }
+
     let state = GameState::default();
     MatchResponse {
         id: id.to_string(),
         mode: MatchMode::Pva,
         players: Players::default(),
         state: serialize_state(&state),
+        ai_profiles: MatchAiProfiles::default(),
+        last_ai_meta: None,
     }
 }
 
