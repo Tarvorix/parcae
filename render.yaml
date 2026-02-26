@@ -27,8 +27,9 @@ services:
   - type: web
     name: parcae-web
     runtime: static
-    buildCommand: cd web && npm ci && npm run build
-    staticPublishPath: ./web/dist
+    rootDir: web
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
     envVars:
       - key: VITE_API_URL
         fromService:
