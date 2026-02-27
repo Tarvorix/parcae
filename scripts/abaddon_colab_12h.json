@@ -1,0 +1,10 @@
+{
+  "description": "Baseline 12-hour Colab tuning profile for Abaddon training",
+  "train_command": "PYTHONPATH=src python3 -m parcaestrategy.cli --train-ai --ai-games 96 --ai-simulations 128 --ai-epochs 2 --ai-batch-size 64 --ai-max-plies 256 --ai-temp-drop-plies 24 --ai-d-model 128 --ai-layers 8 --ai-heads 4 --ai-ffn-dim 384 --ai-dropout 0.1 --ai-lr 0.001 --ai-warmup-steps 200 --ai-checkpoint checkpoints/abaddon_colab_latest.pt",
+  "export_command": "PYTHONPATH=src python3 scripts/export_onnx.py --checkpoint checkpoints/abaddon_colab_latest.pt --out models/rust/parcae_model.onnx --verify-parity",
+  "eval_command": "PYTHONPATH=src python3 scripts/eval_models.py --challenger checkpoints/abaddon_colab_latest.pt --baseline checkpoints/abaddon_baseline.pt --games 40 --simulations 128",
+  "promotion_gate": {
+    "functional": "all tests pass and ONNX parity passes",
+    "strength": "challenger score >= 0.50 vs baseline at equal simulations/time controls"
+  }
+}

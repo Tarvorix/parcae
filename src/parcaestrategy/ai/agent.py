@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import math
 import os
-import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 try:
     import torch
@@ -23,7 +22,11 @@ from parcaestrategy.engine import (
     legal_moves,
 )
 
-from .model import ParcaeNet, load_checkpoint_into_model, state_to_tensor
+from .model import (
+    AbaddonTransformer,
+    load_model_from_checkpoint,
+    state_to_tensor,
+)
 
 # Precompute all geometric moves on the empty board for policy indexing.
 DIRECTIONS: Tuple[Tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
@@ -53,27 +56,6 @@ def list_legal_moves(state: GameState) -> List[Move]:
     return moves
 
 
-def _heuristic_move(state: GameState) -> Optional[Move]:
-    """Fallback: prefer winning moves, then capturing, else first legal."""
-    legal = list_legal_moves(state)
-    if not legal:
-        return None
-    best_move = legal[0]
-    best_score = -1_000_000
-    for mv in legal:
-        next_state = apply_move(state, mv)
-        score = 0
-        if next_state.winner == state.turn:
-            score = 1_000_000
-        gained = next_state.captures[state.turn] - state.captures[state.turn]
-        score += gained * 100
-        score += len(legal_moves(next_state, mv.target))
-        if score > best_score:
-            best_score = score
-            best_move = mv
-    return best_move
-
-
 @dataclass
 class Node:
     state: GameState
@@ -91,7 +73,7 @@ class Node:
 
 
 class AIAgent:
-    """MCTS + policy/value net. Falls back to heuristic if torch/model missing."""
+    """MCTS + Abaddon transformer model."""
 
     def __init__(
         self,
@@ -104,41 +86,54 @@ class AIAgent:
         self.simulations = simulations
         self.c_puct = c_puct
         self.model_path = model_path or os.environ.get("PARCAE_MODEL_PATH")
-        self.model: Optional[ParcaeNet] = None
+        self.model: Optional[AbaddonTransformer] = None
+        self.checkpoint_meta: Optional[Mapping[str, object]] = None
         self.available = False
         self.load_error: Optional[str] = None
         if torch is not None and self.model_path:
             self._load_model()
+        elif torch is None:
+            self.load_error = "PyTorch is unavailable."
+        else:
+            self.load_error = "PARCAE_MODEL_PATH is not set."
 
     def _load_model(self) -> None:
         if self.model_path is None:
             self.available = False
             self.load_error = "PARCAE_MODEL_PATH is not set."
+            self.checkpoint_meta = None
             return
         if not os.path.exists(self.model_path):
             self.available = False
             self.load_error = f"Model path does not exist: {self.model_path}"
+            self.checkpoint_meta = None
             return
 
-        self.model = ParcaeNet(channels=64, blocks=4, move_space=len(ALL_MOVES)).to(self.device)
-        loaded, error = load_checkpoint_into_model(self.model, self.model_path, device=self.device)
-        if not loaded:
+        model, meta, error = load_model_from_checkpoint(
+            self.model_path,
+            move_space=len(ALL_MOVES),
+            device=self.device,
+        )
+        if model is None:
             self.available = False
             self.model = None
             self.load_error = error
-            short_error = error.splitlines()[0] if error else "unknown checkpoint error"
-            warnings.warn(
-                f"Failed to load checkpoint at {self.model_path}; using heuristic fallback. {short_error}",
-                RuntimeWarning,
-            )
+            self.checkpoint_meta = None
             return
-        self.model.eval()
+        self.model = model
         self.available = True
         self.load_error = None
+        self.checkpoint_meta = meta
+
+    def _require_available(self) -> None:
+        if not self.available or self.model is None:
+            detail = self.load_error or "Abaddon model is unavailable."
+            raise RuntimeError(detail)
+        if torch is None or F is None:
+            raise RuntimeError("PyTorch runtime is unavailable.")
 
     def select_move(self, state: GameState) -> Optional[Move]:
-        if not self.available:
-            return _heuristic_move(state)
+        self._require_available()
         move, _ = self._mcts_action(state, temperature=0.0, add_root_noise=False)
         return move
 
@@ -151,15 +146,9 @@ class AIAgent:
         """Return selected move and full policy target over ALL_MOVES.
 
         This is intended for self-play training, where the policy target should
-        come from MCTS visit counts (or one-hot heuristic fallback).
+        come from MCTS visit counts.
         """
-        if not self.available:
-            move = _heuristic_move(state)
-            if move is None or torch is None:
-                return move, None
-            pi = torch.zeros(len(ALL_MOVES), dtype=torch.float32)
-            pi[MOVE_TO_INDEX[(move.origin, move.target)]] = 1.0
-            return move, pi
+        self._require_available()
         return self._mcts_action(
             state,
             temperature=max(0.0, temperature),
@@ -209,10 +198,7 @@ class AIAgent:
                 node.value_sum += v
                 v = -v
 
-        if torch is None:
-            best_move_idx = max(root.children.items(), key=lambda kv: kv[1].visits)[0]
-            return ALL_MOVES[best_move_idx], None
-
+        assert torch is not None
         legal_indices = [MOVE_TO_INDEX[(mv.origin, mv.target)] for mv in legal_root]
         visit_counts = torch.zeros(len(ALL_MOVES), dtype=torch.float32)
         for idx, child in root.children.items():
@@ -279,17 +265,16 @@ class AIAgent:
 
     def _expand(self, node: Node, policy_logits: "torch.Tensor", legal_moves: List[Move]) -> None:  # type: ignore[name-defined]
         node.children = {}
-        if policy_logits is None or torch is None:
-            probs = [1.0 / len(legal_moves)] * len(legal_moves)
-        else:
-            mask = torch.full((len(ALL_MOVES),), -1e9, device=policy_logits.device)
-            for mv in legal_moves:
-                idx = MOVE_TO_INDEX[(mv.origin, mv.target)]
-                mask[idx] = policy_logits[idx]
-            probs = F.softmax(mask, dim=0)
+        if torch is None or F is None:
+            raise RuntimeError("PyTorch runtime is unavailable.")
+        mask = torch.full((len(ALL_MOVES),), -1e9, device=policy_logits.device)
         for mv in legal_moves:
             idx = MOVE_TO_INDEX[(mv.origin, mv.target)]
-            prior = float(probs[idx]) if torch is not None else 1.0 / len(legal_moves)
+            mask[idx] = policy_logits[idx]
+        probs = F.softmax(mask, dim=0)
+        for mv in legal_moves:
+            idx = MOVE_TO_INDEX[(mv.origin, mv.target)]
+            prior = float(probs[idx])
             next_state = apply_move(node.state, mv)
             node.children[idx] = Node(
                 state=next_state,

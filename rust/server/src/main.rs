@@ -166,12 +166,25 @@ struct AppState {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let ai_model_path = std::env::var("PARCAE_MODEL_PATH").ok().map(std::path::PathBuf::from);
-    let ai = Arc::new(AIAgent::new(
-        ai_model_path,
-        64,
-        1.25,
-    ));
+    let ai_model_path = std::env::var("PARCAE_MODEL_PATH")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let ai_agent = AIAgent::new(ai_model_path, 64, 1.25);
+    if let Some(err) = ai_agent.startup_validation_error() {
+        return Err(anyhow::anyhow!(err));
+    }
+    let caps = ai_agent.capabilities();
+    info!(
+        "AI preflight: default_backend={:?} strict_mode={} assets_ok={} book_loaded={} tb_loaded={} nnue_loaded={} abaddon_available={}",
+        caps.default_backend,
+        caps.centurion_strict_mode,
+        caps.centurion_assets_ok,
+        caps.centurion_book_loaded,
+        caps.centurion_tb_loaded,
+        caps.centurion_nnue_loaded,
+        caps.abaddon_available
+    );
+    let ai = Arc::new(ai_agent);
     let state = AppState {
         matches: Arc::new(dashmap::DashMap::new()),
         hub: Arc::new(dashmap::DashMap::new()),
@@ -291,7 +304,7 @@ async fn create_match(
     let mut last_ai_meta = None;
     if req.mode == MatchMode::Ava {
         last_ai_meta = run_ai_turns(&app.ai, &mut state, &ai_profiles, Some(1))
-            .map_err(|e| ApiError::server(e.to_string()))?;
+            .map_err(map_ai_turn_error)?;
     }
 
     let entry = Arc::new(MatchEntry {
@@ -392,7 +405,7 @@ async fn play_move(
         *state = next;
 
         run_ai_turns(&app.ai, &mut state, &entry.ai_profiles, None)
-            .map_err(|e| ApiError::server(e.to_string()))?
+            .map_err(map_ai_turn_error)?
     };
 
     if let Some(meta) = latest_meta {
@@ -422,7 +435,7 @@ async fn step_ai(
         }
 
         run_ai_turns(&app.ai, &mut state, &entry.ai_profiles, Some(1))
-            .map_err(|e| ApiError::server(e.to_string()))?
+            .map_err(map_ai_turn_error)?
     };
 
     if let Some(meta) = latest_meta {
@@ -574,6 +587,18 @@ fn run_ai_turns(
     }
 
     Ok(latest_meta)
+}
+
+fn map_ai_turn_error(err: anyhow::Error) -> ApiError {
+    let message = err.to_string();
+    if message.contains("abaddon model unavailable")
+        || message.contains("abaddon ONNX")
+        || message.contains("abaddon policy output length mismatch")
+        || message.contains("abaddon value output is non-finite")
+    {
+        return ApiError::bad_request(message);
+    }
+    ApiError::server(message)
 }
 
 fn serialize_match(id: &str, app: &AppState) -> MatchResponse {

@@ -1,8 +1,8 @@
 export type Color = "white" | "black";
 export type PieceType = "soldier" | "dux";
 export type Controller = "player" | "agent" | "ai";
-export type AiBackend = "heuristic" | "centurion" | "alphazero" | "stockfish";
-export type AiMoveSource = "heuristic" | "search" | "book" | "tb";
+export type AiBackend = "heuristic" | "centurion" | "abaddon" | "stockfish";
+export type AiMoveSource = "heuristic" | "search" | "book" | "tb" | "emergency";
 
 export type Piece = {
   color: Color;
@@ -38,6 +38,7 @@ export type AiProfile = {
   use_book?: boolean;
   use_tb?: boolean;
   skill?: number;
+  threads?: number;
 };
 
 export type MatchAiProfiles = {
@@ -67,10 +68,17 @@ export type MatchResponse = {
 export type AiCapabilities = {
   supported_backends: AiBackend[];
   default_backend: AiBackend;
-  onnx_available: boolean;
+  abaddon_available: boolean;
   centurion_book_loaded: boolean;
   centurion_tb_loaded: boolean;
   centurion_nnue_loaded: boolean;
+  centurion_strict_mode: boolean;
+  centurion_required_assets: {
+    book: boolean;
+    tb: boolean;
+    nnue: boolean;
+  };
+  centurion_assets_ok: boolean;
   default_profile: AiProfile;
 };
 

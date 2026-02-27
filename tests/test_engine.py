@@ -95,3 +95,9 @@ def test_dux_immobilization_is_victory():
     result = apply_move(state, Move(origin=(0, 2), target=(0, 1)))
     assert result.winner is Color.WHITE
     assert result.summary and "Dux" in result.summary
+
+
+def test_dux_blocked_by_own_side_is_not_immobilization_loss():
+    state = initial_state(dux_file=5)
+    result = apply_move(state, Move(origin=(5, 0), target=(5, 6)))
+    assert result.winner is None

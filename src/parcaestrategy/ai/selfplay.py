@@ -10,7 +10,7 @@ except ImportError:  # pragma: no cover - torch optional
 
 from parcaestrategy.engine import Color, GameState, apply_move, initial_state
 
-from .agent import AIAgent, MOVE_TO_INDEX, list_legal_moves
+from .agent import AIAgent, list_legal_moves
 from .model import state_to_tensor
 
 
@@ -21,13 +21,22 @@ class Experience:
     z: float  # outcome from perspective of state.turn
 
 
+@dataclass
+class SelfPlayResult:
+    winner: Optional[Color]
+    white_captures: int
+    black_captures: int
+    plies: int
+    end_reason: str
+
+
 def self_play_game(
     agent: AIAgent,
     temperature: float = 1.0,
     max_plies: int = 256,
     temperature_drop_plies: int = 20,
-) -> Tuple[List[Experience], Optional[Color]]:
-    """Play one self-play game, returning experiences and winner."""
+) -> Tuple[List[Experience], SelfPlayResult]:
+    """Play one self-play game and return experiences plus final game stats."""
     if torch is None:
         raise ImportError("PyTorch required for self-play. Install with `pip install torch`.") from None
 
@@ -56,8 +65,7 @@ def self_play_game(
             break
 
         if pi is None:
-            pi = torch.zeros(len(MOVE_TO_INDEX), dtype=torch.float32)
-            pi[MOVE_TO_INDEX[(move.origin, move.target)]] = 1.0
+            raise RuntimeError("Abaddon policy output missing during self-play.")
 
         experiences.append(Experience(tensor=state_to_tensor(state), pi=pi, z=0.0))
         players.append(state.turn)
@@ -70,8 +78,14 @@ def self_play_game(
         black_score = state.captures[Color.BLACK]
         if white_score > black_score:
             winner = Color.WHITE
+            end_reason = "max_plies_capture_lead_white"
         elif black_score > white_score:
             winner = Color.BLACK
+            end_reason = "max_plies_capture_lead_black"
+        else:
+            end_reason = "max_plies_capture_draw"
+    else:
+        end_reason = state.summary or "terminal"
 
     for exp, player in zip(experiences, players):
         if winner is None:
@@ -79,4 +93,11 @@ def self_play_game(
         else:
             exp.z = 1.0 if winner == player else -1.0
 
-    return experiences, winner
+    result = SelfPlayResult(
+        winner=winner,
+        white_captures=state.captures[Color.WHITE],
+        black_captures=state.captures[Color.BLACK],
+        plies=plies,
+        end_reason=end_reason,
+    )
+    return experiences, result

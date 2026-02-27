@@ -217,7 +217,7 @@ def _determine_winner(
 ) -> Tuple[Optional[Color], Optional[str]]:
     opponent = mover.opponent()
     opponent_dux = _find_piece(board, opponent, PieceType.DUX)
-    if opponent_dux is not None and not _piece_has_legal_moves(board, opponent_dux):
+    if opponent_dux is not None and _dux_immobilized_by_enemy(board, opponent_dux, mover):
         return mover, "Opponent Dux immobilized."
 
     if not any_legal_moves(board, opponent):
@@ -230,6 +230,21 @@ def _determine_winner(
         return mover, "All opposing soldiers removed (material victory)."
 
     return None, None
+
+
+def _dux_immobilized_by_enemy(board: Dict[Coord, Piece], dux: Coord, enemy: Color) -> bool:
+    """Return True only when each in-bounds orthogonal adjacent square has an enemy piece.
+
+    Board edges are neutral; friendly blockers do not count as an immobilization victory.
+    """
+    for dx, dy in DIRECTIONS:
+        adj = (dux[0] + dx, dux[1] + dy)
+        if not coord_in_bounds(adj):
+            continue
+        occupant = board.get(adj)
+        if occupant is None or occupant.color is not enemy:
+            return False
+    return True
 
 
 def _piece_has_legal_moves(board: Dict[Coord, Piece], origin: Coord) -> bool:

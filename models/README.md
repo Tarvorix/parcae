@@ -1,13 +1,14 @@
 # Parcae models
 
-- `models/python/parcae_model.pth`: PyTorch checkpoint produced by the existing Python training loop.
+- `models/python/parcae_model.pth`: Legacy PyTorch checkpoint (older architecture; may be incompatible).
+- `checkpoints/parcae_latest.pt`: Current Abaddon transformer checkpoint (`meta.arch=abaddon_transformer`).
 - `models/rust/parcae_model.onnx`: ONNX export used by Rust inference (native and WASM builds via onnxruntime).
 - `models/rust/book/centurion_book_v1.bin`: Centurion opening book artifact (self-play generated).
 - `models/rust/tablebases/centurion_tb_4pc_v1.bin`: Centurion tablebase artifact for up to 4 pieces.
 - `models/rust/nnue/centurion_nnue_v1.bin`: Centurion NNUE weights (optional but recommended).
 
 Export flow:
-1. Train in Python to update `parcae_model.pth`.
+1. Train in Python to update `checkpoints/parcae_latest.pt`.
 2. Run `scripts/export_onnx.py` to emit the ONNX file into `models/rust/`.
 3. Configure the Rust server or WASM AI to read `PARCAE_MODEL_PATH` (defaults to `models/rust/parcae_model.onnx`).
 

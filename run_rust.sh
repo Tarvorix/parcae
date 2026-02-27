@@ -16,6 +16,11 @@ PTH_CHECKPOINT="$ROOT/checkpoints/parcae_latest.pt"
 EXPORT_SCRIPT="$ROOT/scripts/export_onnx.py"
 SERVER_TARGET_DIR="$ROOT/rust/target_server_local"
 UI_TARGET_DIR="$ROOT/rust/target_wasm_local"
+PARCAE_REQUIRE_ONNX="${PARCAE_REQUIRE_ONNX:-0}"
+PARCAE_CENTURION_STRICT="${PARCAE_CENTURION_STRICT:-1}"
+PARCAE_CENTURION_REQUIRE_BOOK="${PARCAE_CENTURION_REQUIRE_BOOK:-$PARCAE_CENTURION_STRICT}"
+PARCAE_CENTURION_REQUIRE_TB="${PARCAE_CENTURION_REQUIRE_TB:-$PARCAE_CENTURION_STRICT}"
+PARCAE_CENTURION_REQUIRE_NNUE="${PARCAE_CENTURION_REQUIRE_NNUE:-$PARCAE_CENTURION_STRICT}"
 
 want_ui=false
 while [[ $# -gt 0 ]]; do
@@ -38,13 +43,19 @@ if [[ ! -f "$MODEL" ]]; then
 
   if [[ -z "$SRC" ]]; then
     echo "No ONNX model found at $MODEL and no compatible checkpoint source found."
-    echo "Continuing with heuristic AI fallback."
+    if [[ "$PARCAE_REQUIRE_ONNX" == "1" ]]; then
+      echo "PARCAE_REQUIRE_ONNX=1, refusing to start without ONNX." >&2
+      exit 1
+    fi
     use_onnx=false
   else
     echo "Exporting ONNX from $SRC -> $MODEL ..."
     if ! PYTHONPATH="$ROOT/src${PYTHONPATH+:$PYTHONPATH}" \
       python3 "$EXPORT_SCRIPT" --checkpoint "$SRC" --out "$MODEL"; then
-      echo "ONNX export failed. Continuing with heuristic AI fallback."
+      if [[ "$PARCAE_REQUIRE_ONNX" == "1" ]]; then
+        echo "PARCAE_REQUIRE_ONNX=1 and ONNX export failed." >&2
+        exit 1
+      fi
       use_onnx=false
     fi
   fi
@@ -55,32 +66,50 @@ if [[ "$use_onnx" == true && -f "$MODEL" ]]; then
   echo "Using ONNX model: $PARCAE_MODEL_PATH"
 else
   unset PARCAE_MODEL_PATH || true
-  echo "Starting Rust server without ONNX model (heuristic AI fallback)."
+  echo "Abaddon ONNX unavailable; backend remains disabled."
 fi
 
 if [[ -f "$BOOK_MODEL" ]]; then
   export PARCAE_BOOK_PATH="$BOOK_MODEL"
   echo "Using Centurion book: $PARCAE_BOOK_PATH"
 else
+  if [[ "$PARCAE_CENTURION_REQUIRE_BOOK" == "1" ]]; then
+    echo "Missing required Centurion book: $BOOK_MODEL" >&2
+    exit 1
+  fi
   unset PARCAE_BOOK_PATH || true
-  echo "No Centurion book file found."
+  echo "Centurion book missing (allowed by config)."
 fi
 
 if [[ -f "$TB_MODEL" ]]; then
   export PARCAE_TB_PATH="$TB_MODEL"
   echo "Using Centurion tablebase: $PARCAE_TB_PATH"
 else
+  if [[ "$PARCAE_CENTURION_REQUIRE_TB" == "1" ]]; then
+    echo "Missing required Centurion tablebase: $TB_MODEL" >&2
+    exit 1
+  fi
   unset PARCAE_TB_PATH || true
-  echo "No Centurion tablebase file found."
+  echo "Centurion tablebase missing (allowed by config)."
 fi
 
 if [[ -f "$NNUE_MODEL" ]]; then
   export PARCAE_NNUE_PATH="$NNUE_MODEL"
   echo "Using Centurion NNUE: $PARCAE_NNUE_PATH"
 else
+  if [[ "$PARCAE_CENTURION_REQUIRE_NNUE" == "1" ]]; then
+    echo "Missing required Centurion NNUE: $NNUE_MODEL" >&2
+    exit 1
+  fi
   unset PARCAE_NNUE_PATH || true
-  echo "No Centurion NNUE file found (Centurion will use handcrafted eval blend fallback)."
+  echo "Centurion NNUE missing (allowed by config)."
 fi
+
+export PARCAE_CENTURION_STRICT
+export PARCAE_CENTURION_REQUIRE_BOOK
+export PARCAE_CENTURION_REQUIRE_TB
+export PARCAE_CENTURION_REQUIRE_NNUE
+echo "Centurion strict: $PARCAE_CENTURION_STRICT (book=$PARCAE_CENTURION_REQUIRE_BOOK tb=$PARCAE_CENTURION_REQUIRE_TB nnue=$PARCAE_CENTURION_REQUIRE_NNUE)"
 
 # Help ONNX runtime locate dylib on macOS if installed by Homebrew.
 if [[ -d "/opt/homebrew/opt/onnxruntime/lib" ]]; then

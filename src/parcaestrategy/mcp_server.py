@@ -50,7 +50,7 @@ def health() -> Dict[str, Any]:
         "Create a match. Modes: pva (player vs ai), pvg (player vs agent), "
         "gvg (agent vs agent), gva (agent vs ai), ava (ai vs ai). "
         "Optionally pass ai_profiles to select ai backend per side "
-        "(heuristic|centurion|alphazero)."
+        "(heuristic|centurion|abaddon)."
     )
 )
 def create_match(mode: str = "pvg", ai_profiles: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

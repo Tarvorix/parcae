@@ -3,7 +3,7 @@
 Kowalski/Stanway Ludus Latrunculorum implementation with:
 
 - Rust production server + shared Rust rules engine (`rust/server`, `rust/engine`)
-- Rust multi-backend AI runtime (`heuristic`, `centurion`, `alphazero`) in `rust/ai`
+- Rust multi-backend AI runtime (`heuristic`, `centurion`, `abaddon`) in `rust/ai`
 - Python headless tooling for training/export/MCP (`src/parcaestrategy`)
 - React/Vite TypeScript client in `web/`
 
@@ -14,12 +14,17 @@ Kowalski/Stanway Ludus Latrunculorum implementation with:
 ```
 
 This starts the Rust API on `http://127.0.0.1:8000`.
+`run_rust.sh` now defaults to strict Centurion startup (`book/tb/nnue` required) and fails fast if required artifacts are missing.
 
-- `PARCAE_MODEL_PATH` controls AlphaZero ONNX path.
-- `PARCAE_AI_DEFAULT_BACKEND` controls default backend (`heuristic|centurion|alphazero`).
+- `PARCAE_MODEL_PATH` controls Abaddon ONNX path.
+- `PARCAE_AI_DEFAULT_BACKEND` controls default backend (`heuristic|centurion|abaddon`).
 - `PARCAE_STOCKFISH_DEFAULT_TIME_MS` and `PARCAE_STOCKFISH_DEFAULT_HASH_MB` control Centurion defaults.
 - `PARCAE_BOOK_PATH` and `PARCAE_TB_PATH` control Centurion book/tablebase artifacts.
 - `PARCAE_NNUE_PATH` controls optional Centurion NNUE weights.
+- `PARCAE_CENTURION_THREADS` controls Centurion root-parallel thread count.
+- `PARCAE_CENTURION_STRICT=1` forces startup failure when required Centurion assets are missing.
+- `PARCAE_CENTURION_REQUIRE_BOOK|PARCAE_CENTURION_REQUIRE_TB|PARCAE_CENTURION_REQUIRE_NNUE` select strict required assets.
+- `PARCAE_REQUIRE_ONNX=1` fails startup if Abaddon ONNX cannot be loaded/exported.
 
 ## Python / API quickstart
 
@@ -67,7 +72,8 @@ curl -X POST http://localhost:8000/match \
         "hash_mb": 128,
         "use_book": true,
         "use_tb": true,
-        "skill": 12
+        "skill": 12,
+        "threads": 2
       }
     }
   }'
@@ -121,12 +127,19 @@ Notes:
 - `parcae-web` uses `VITE_API_URL` from the backend `RENDER_EXTERNAL_URL`.
 - Backend health check is `/health`.
 - Backend binds `HOST=0.0.0.0` and uses Render `PORT`.
-- To enable full AlphaZero/Centurion artifacts, set:
+- Blueprint pins strict Centurion startup and required assets so deployments fail fast if artifacts are missing/corrupt.
+- To enable full Abaddon/Centurion artifacts, set:
   - `PARCAE_MODEL_PATH`
   - `PARCAE_BOOK_PATH`
   - `PARCAE_TB_PATH`
   - `PARCAE_NNUE_PATH`
   using paths that exist in the deployed environment.
+
+Post-deploy smoke check:
+
+```bash
+./scripts/render_smoke.sh https://<your-api>.onrender.com https://<your-web>.onrender.com
+```
 
 ## MCP quickstart (agent control)
 
@@ -163,15 +176,36 @@ parcaestrategy --train-ai \
   - `--ai-batch-size` controls SGD batch size.
   - `--ai-max-plies` caps game length to avoid endless loops.
   - `--ai-temp-drop-plies` switches from exploratory to greedy play late in game.
+  - `--ai-d-model --ai-layers --ai-heads --ai-ffn-dim --ai-dropout` configure Abaddon architecture.
+  - `--ai-lr --ai-warmup-steps` tune optimization schedule.
 
-- The API will load `PARCAE_MODEL_PATH` if set and compatible; otherwise it falls back to a heuristic bot. Example:
+- The training stack writes strict Abaddon transformer checkpoints (with metadata `arch=abaddon_transformer`).
+- Python `AIAgent` now fail-hard errors when Abaddon is unavailable; no implicit heuristic fallback inside Abaddon paths.
+- For Rust runtime, selecting backend `abaddon` with missing/invalid ONNX returns explicit API error, while `centurion` and `heuristic` are unaffected.
+- Example model path:
 
 ```bash
 export PARCAE_MODEL_PATH=checkpoints/parcae_latest.pt
 parcaestrategy --serve
 ```
 
-- `models/python/parcae_model.pth` may be from an older architecture and can be incompatible with the current code. Train a fresh checkpoint first, then export ONNX if needed.
+- `models/python/parcae_model.pth` may be from an older architecture and is incompatible with Abaddon checkpoints. Train a fresh checkpoint first, then export ONNX.
+
+Abaddon evaluation workflow:
+
+```bash
+PYTHONPATH=src python3 scripts/eval_models.py \
+  --challenger checkpoints/parcae_latest.pt \
+  --baseline checkpoints/abaddon_baseline.pt \
+  --games 40 \
+  --simulations 128
+```
+
+Colab-oriented 12-hour profile:
+
+```bash
+cat scripts/abaddon_colab_12h.json
+```
 
 Centurion artifact generators:
 

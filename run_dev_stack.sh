@@ -22,6 +22,11 @@ MODEL="$ROOT/models/rust/parcae_model.onnx"
 BOOK="$ROOT/models/rust/book/centurion_book_v1.bin"
 TB="$ROOT/models/rust/tablebases/centurion_tb_4pc_v1.bin"
 NNUE="$ROOT/models/rust/nnue/centurion_nnue_v1.bin"
+PARCAE_REQUIRE_ONNX="${PARCAE_REQUIRE_ONNX:-0}"
+PARCAE_CENTURION_STRICT="${PARCAE_CENTURION_STRICT:-1}"
+PARCAE_CENTURION_REQUIRE_BOOK="${PARCAE_CENTURION_REQUIRE_BOOK:-$PARCAE_CENTURION_STRICT}"
+PARCAE_CENTURION_REQUIRE_TB="${PARCAE_CENTURION_REQUIRE_TB:-$PARCAE_CENTURION_STRICT}"
+PARCAE_CENTURION_REQUIRE_NNUE="${PARCAE_CENTURION_REQUIRE_NNUE:-$PARCAE_CENTURION_STRICT}"
 
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]]; then
@@ -43,35 +48,57 @@ echo "Starting Rust API at $API_BASE ..."
 SERVER_ENV=(
   "HOST=$HOST"
   "PORT=$PORT"
+  "PARCAE_CENTURION_STRICT=$PARCAE_CENTURION_STRICT"
+  "PARCAE_CENTURION_REQUIRE_BOOK=$PARCAE_CENTURION_REQUIRE_BOOK"
+  "PARCAE_CENTURION_REQUIRE_TB=$PARCAE_CENTURION_REQUIRE_TB"
+  "PARCAE_CENTURION_REQUIRE_NNUE=$PARCAE_CENTURION_REQUIRE_NNUE"
 )
 
 if [[ -f "$MODEL" ]]; then
   SERVER_ENV+=("PARCAE_MODEL_PATH=$MODEL")
-  echo "AlphaZero model: $MODEL"
+  echo "Abaddon model: $MODEL"
 else
-  echo "AlphaZero model missing: $MODEL"
+  if [[ "$PARCAE_REQUIRE_ONNX" == "1" ]]; then
+    echo "Missing required Abaddon model: $MODEL" >&2
+    exit 1
+  fi
+  echo "Abaddon model missing (backend disabled): $MODEL"
 fi
 
 if [[ -f "$BOOK" ]]; then
   SERVER_ENV+=("PARCAE_BOOK_PATH=$BOOK")
   echo "Centurion book: $BOOK"
 else
-  echo "Centurion book missing: $BOOK"
+  if [[ "$PARCAE_CENTURION_REQUIRE_BOOK" == "1" ]]; then
+    echo "Missing required Centurion book: $BOOK" >&2
+    exit 1
+  fi
+  echo "Centurion book missing (allowed by config): $BOOK"
 fi
 
 if [[ -f "$TB" ]]; then
   SERVER_ENV+=("PARCAE_TB_PATH=$TB")
   echo "Centurion tablebase: $TB"
 else
-  echo "Centurion tablebase missing: $TB"
+  if [[ "$PARCAE_CENTURION_REQUIRE_TB" == "1" ]]; then
+    echo "Missing required Centurion tablebase: $TB" >&2
+    exit 1
+  fi
+  echo "Centurion tablebase missing (allowed by config): $TB"
 fi
 
 if [[ -f "$NNUE" ]]; then
   SERVER_ENV+=("PARCAE_NNUE_PATH=$NNUE")
   echo "Centurion NNUE: $NNUE"
 else
-  echo "Centurion NNUE missing: $NNUE"
+  if [[ "$PARCAE_CENTURION_REQUIRE_NNUE" == "1" ]]; then
+    echo "Missing required Centurion NNUE: $NNUE" >&2
+    exit 1
+  fi
+  echo "Centurion NNUE missing (allowed by config): $NNUE"
 fi
+
+echo "Centurion strict: $PARCAE_CENTURION_STRICT (book=$PARCAE_CENTURION_REQUIRE_BOOK tb=$PARCAE_CENTURION_REQUIRE_TB nnue=$PARCAE_CENTURION_REQUIRE_NNUE)"
 
 # Help ONNX runtime locate dylib on macOS if installed by Homebrew.
 ORT_LIB=""

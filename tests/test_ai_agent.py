@@ -11,26 +11,25 @@ from parcaestrategy.ai.selfplay import self_play_game
 from parcaestrategy.engine import Color, initial_state
 
 
-def test_agent_without_checkpoint_uses_heuristic() -> None:
+def test_agent_without_checkpoint_is_unavailable() -> None:
     agent = AIAgent(model_path=None)
     state = initial_state()
-    move = agent.select_move(state)
     assert not agent.available
-    assert move is not None
+    with pytest.raises(RuntimeError, match="PARCAE_MODEL_PATH"):
+        agent.select_move(state)
 
 
-def test_incompatible_checkpoint_falls_back_to_heuristic() -> None:
+def test_incompatible_checkpoint_reports_error() -> None:
     checkpoint = Path("models/python/parcae_model.pth")
     if not checkpoint.exists():
         pytest.skip("Bundled checkpoint not present in this environment.")
 
-    with pytest.warns(RuntimeWarning, match="using heuristic fallback"):
-        agent = AIAgent(model_path=str(checkpoint))
+    agent = AIAgent(model_path=str(checkpoint))
     state = initial_state()
-    move = agent.select_move(state)
     assert not agent.available
     assert agent.load_error
-    assert move is not None
+    with pytest.raises(RuntimeError):
+        agent.select_move(state)
 
 
 def test_ucb_selection_uses_parent_perspective() -> None:
@@ -60,11 +59,7 @@ def test_ucb_selection_uses_parent_perspective() -> None:
     assert selected_idx == 1
 
 
-def test_self_play_fallback_policy_target_is_one_hot() -> None:
+def test_self_play_requires_available_abaddon_model() -> None:
     agent = AIAgent(model_path=None)
-    experiences, _winner = self_play_game(agent, max_plies=1)
-    assert experiences
-    pi = experiences[0].pi
-    assert float(pi.sum().item()) == pytest.approx(1.0)
-    assert int((pi > 0).sum().item()) == 1
-    assert float(pi.max().item()) == pytest.approx(1.0)
+    with pytest.raises(RuntimeError):
+        self_play_game(agent, max_plies=1)

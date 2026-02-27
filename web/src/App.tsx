@@ -30,11 +30,11 @@ const MODE_LABELS: Record<MatchMode, string> = {
   ava: "AI vs AI",
 };
 
-const BACKEND_OPTIONS: AiBackend[] = ["heuristic", "centurion", "alphazero"];
+const BACKEND_OPTIONS: AiBackend[] = ["heuristic", "centurion", "abaddon"];
 const BACKEND_LABELS: Record<AiBackend, string> = {
   heuristic: "Heuristic",
   centurion: "Centurion",
-  alphazero: "AlphaZero",
+  abaddon: "Abaddon",
   stockfish: "Centurion",
 };
 
@@ -95,6 +95,8 @@ export const App: React.FC = () => {
 
   const aiSides = aiSidesForMode(mode);
   const agentCountRequired = requiredAgentCount(mode);
+  const abaddonUnavailable =
+    capabilities !== null && !capabilities.abaddon_available;
   const connectedAgentCount = agentStatus?.active_count ?? 0;
   const agentsReady = connectedAgentCount >= agentCountRequired;
   const requiresAgents = agentCountRequired > 0;
@@ -167,6 +169,19 @@ export const App: React.FC = () => {
     match != null &&
     !match.state.winner &&
     match.players[match.state.turn] === "ai";
+
+  const isBackendDisabled = (backend: AiBackend): boolean =>
+    backend === "abaddon" && abaddonUnavailable;
+
+  useEffect(() => {
+    if (!abaddonUnavailable) return;
+    if (whiteBackend === "abaddon") {
+      setWhiteBackend("centurion");
+    }
+    if (blackBackend === "abaddon") {
+      setBlackBackend("centurion");
+    }
+  }, [abaddonUnavailable, whiteBackend, blackBackend]);
 
   const selectedProfiles: MatchAiProfiles = {};
   if (aiSides.includes("white")) {
@@ -295,7 +310,7 @@ export const App: React.FC = () => {
                     onChange={(e) => setWhiteBackend(e.target.value as AiBackend)}
                   >
                     {BACKEND_OPTIONS.map((backend) => (
-                      <option key={backend} value={backend}>
+                      <option key={backend} value={backend} disabled={isBackendDisabled(backend)}>
                         {BACKEND_LABELS[backend]}
                       </option>
                     ))}
@@ -311,7 +326,7 @@ export const App: React.FC = () => {
                     onChange={(e) => setBlackBackend(e.target.value as AiBackend)}
                   >
                     {BACKEND_OPTIONS.map((backend) => (
-                      <option key={backend} value={backend}>
+                      <option key={backend} value={backend} disabled={isBackendDisabled(backend)}>
                         {BACKEND_LABELS[backend]}
                       </option>
                     ))}
@@ -319,6 +334,11 @@ export const App: React.FC = () => {
                 </label>
               )}
             </div>
+            {abaddonUnavailable && (
+              <div className="hint warning">
+                Abaddon is unavailable in this runtime (missing or invalid model artifact).
+              </div>
+            )}
 
             {capabilities && (
               <div className="status-row">
@@ -326,10 +346,16 @@ export const App: React.FC = () => {
                   Backends:{" "}
                   {capabilities.supported_backends.map((b) => BACKEND_LABELS[b]).join(", ")}
                 </div>
+                <div>
+                  Centurion strict: {capabilities.centurion_strict_mode ? "on" : "off"}
+                </div>
+                <div>
+                  Centurion assets: {capabilities.centurion_assets_ok ? "ok" : "invalid"}
+                </div>
                 <div>Book: {capabilities.centurion_book_loaded ? "loaded" : "missing"}</div>
                 <div>Tablebase: {capabilities.centurion_tb_loaded ? "loaded" : "missing"}</div>
                 <div>NNUE: {capabilities.centurion_nnue_loaded ? "loaded" : "missing"}</div>
-                <div>ONNX: {capabilities.onnx_available ? "loaded" : "missing"}</div>
+                <div>Abaddon: {capabilities.abaddon_available ? "loaded" : "missing"}</div>
               </div>
             )}
 

@@ -1,4 +1,4 @@
-//! Parcae AI runtime: heuristic, AlphaZero (ONNX+MCTS), and Centurion (alpha-beta).
+//! Parcae AI runtime: heuristic, Abaddon (ONNX+MCTS), and Centurion (alpha-beta).
 
 use engine::{
     apply_move, legal_moves, Color, Coord, GameState, Move, PieceType, BOARD_HEIGHT, BOARD_WIDTH,
@@ -6,6 +6,7 @@ use engine::{
 use once_cell::sync::Lazy;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -25,7 +26,7 @@ use std::path::Path as StdPath;
 pub enum AiError {
     #[error("no legal moves")]
     NoLegalMoves,
-    #[error("alpha-zero model unavailable")]
+    #[error("abaddon model unavailable")]
     ModelUnavailable,
     #[error("invalid ai profile: {0}")]
     InvalidProfile(String),
@@ -79,7 +80,7 @@ pub type MoveCoord = (u8, u8);
 #[serde(rename_all = "lowercase")]
 pub enum AiBackend {
     Heuristic,
-    Alphazero,
+    Abaddon,
     #[serde(rename = "centurion", alias = "stockfish")]
     Centurion,
 }
@@ -91,6 +92,7 @@ pub enum AiMoveSource {
     Search,
     Book,
     Tb,
+    Emergency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +111,8 @@ pub struct AiProfile {
     pub use_tb: bool,
     #[serde(default = "default_skill")]
     pub skill: u8,
+    #[serde(default = "default_threads")]
+    pub threads: usize,
 }
 
 fn default_backend() -> AiBackend {
@@ -132,6 +136,9 @@ fn default_use_tb() -> bool {
 fn default_skill() -> u8 {
     12
 }
+fn default_threads() -> usize {
+    runtime_default_threads()
+}
 
 impl Default for AiProfile {
     fn default() -> Self {
@@ -143,6 +150,7 @@ impl Default for AiProfile {
             use_book: default_use_book(),
             use_tb: default_use_tb(),
             skill: default_skill(),
+            threads: default_threads(),
         }
     }
 }
@@ -160,6 +168,10 @@ impl AiProfile {
             out.hash_mb = defaults.hash_mb;
         }
         out.skill = out.skill.clamp(1, 20);
+        if out.threads == 0 {
+            out.threads = defaults.threads.max(1);
+        }
+        out.threads = out.threads.max(1);
         out
     }
 }
@@ -185,11 +197,21 @@ pub struct AiSelection {
 pub struct AiCapabilities {
     pub supported_backends: Vec<AiBackend>,
     pub default_backend: AiBackend,
-    pub onnx_available: bool,
+    pub abaddon_available: bool,
     pub centurion_book_loaded: bool,
     pub centurion_tb_loaded: bool,
     pub centurion_nnue_loaded: bool,
+    pub centurion_strict_mode: bool,
+    pub centurion_required_assets: CenturionRequiredAssets,
+    pub centurion_assets_ok: bool,
     pub default_profile: AiProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CenturionRequiredAssets {
+    pub book: bool,
+    pub tb: bool,
+    pub nnue: bool,
 }
 
 pub trait MoveSelector {
@@ -204,21 +226,27 @@ pub trait MoveSelector {
 pub struct AIAgent {
     default_profile: AiProfile,
     heuristic: HeuristicAgent,
-    alphazero: AlphaZeroAgent,
+    abaddon: AbaddonAgent,
     centurion: CenturionAgent,
+    centurion_strict_mode: bool,
+    centurion_required_assets: CenturionRequiredAssets,
+    centurion_assets_ok: bool,
+    startup_validation_error: Option<String>,
 }
 
 impl fmt::Debug for AIAgent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AIAgent")
             .field("default_profile", &self.default_profile)
-            .field("alphazero_available", &self.alphazero.available())
+            .field("abaddon_available", &self.abaddon.available())
             .field(
                 "centurion_book_loaded",
                 &self.centurion.opening_book.is_some(),
             )
             .field("centurion_tb_loaded", &self.centurion.tablebase.is_some())
             .field("centurion_nnue_loaded", &self.centurion.nnue.is_some())
+            .field("centurion_strict_mode", &self.centurion_strict_mode)
+            .field("centurion_assets_ok", &self.centurion_assets_ok)
             .finish()
     }
 }
@@ -248,6 +276,11 @@ impl AIAgent {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(default_profile.hash_mb)
             .max(1);
+        default_profile.threads = std::env::var("PARCAE_CENTURION_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| v.max(1))
+            .unwrap_or_else(runtime_default_threads);
 
         let model_path =
             model_path.or_else(|| std::env::var("PARCAE_MODEL_PATH").ok().map(PathBuf::from));
@@ -269,16 +302,47 @@ impl AIAgent {
         let nnue = load_nnue_weights(&nnue_path)
             .ok()
             .map(|weights| NnueEvaluator::new(Arc::new(weights)));
+        let centurion_strict_mode = env_flag("PARCAE_CENTURION_STRICT", false);
+        let required_assets = CenturionRequiredAssets {
+            book: env_flag("PARCAE_CENTURION_REQUIRE_BOOK", centurion_strict_mode),
+            tb: env_flag("PARCAE_CENTURION_REQUIRE_TB", centurion_strict_mode),
+            nnue: env_flag("PARCAE_CENTURION_REQUIRE_NNUE", centurion_strict_mode),
+        };
+        let centurion_assets_ok = (!required_assets.book || opening_book.is_some())
+            && (!required_assets.tb || tablebase.is_some())
+            && (!required_assets.nnue || nnue.is_some());
+        let startup_validation_error = if centurion_strict_mode && !centurion_assets_ok {
+            let mut missing = Vec::new();
+            if required_assets.book && opening_book.is_none() {
+                missing.push("book");
+            }
+            if required_assets.tb && tablebase.is_none() {
+                missing.push("tablebase");
+            }
+            if required_assets.nnue && nnue.is_none() {
+                missing.push("nnue");
+            }
+            Some(format!(
+                "Centurion strict startup failed; required assets missing/unreadable: {}",
+                missing.join(", ")
+            ))
+        } else {
+            None
+        };
 
         Self {
             default_profile,
             heuristic: HeuristicAgent,
-            alphazero: AlphaZeroAgent::new(model_path, simulations, c_puct),
+            abaddon: AbaddonAgent::new(model_path, simulations, c_puct),
             centurion: CenturionAgent {
                 opening_book,
                 tablebase,
                 nnue,
             },
+            centurion_strict_mode,
+            centurion_required_assets: required_assets,
+            centurion_assets_ok,
+            startup_validation_error,
         }
     }
 
@@ -287,7 +351,7 @@ impl AIAgent {
     }
 
     pub fn available(&self) -> bool {
-        self.alphazero.available()
+        self.abaddon.available()
     }
 
     pub fn capabilities(&self) -> AiCapabilities {
@@ -295,15 +359,22 @@ impl AIAgent {
             supported_backends: vec![
                 AiBackend::Heuristic,
                 AiBackend::Centurion,
-                AiBackend::Alphazero,
+                AiBackend::Abaddon,
             ],
             default_backend: self.default_profile.backend,
-            onnx_available: self.alphazero.available(),
+            abaddon_available: self.abaddon.available(),
             centurion_book_loaded: self.centurion.opening_book.is_some(),
             centurion_tb_loaded: self.centurion.tablebase.is_some(),
             centurion_nnue_loaded: self.centurion.nnue.is_some(),
+            centurion_strict_mode: self.centurion_strict_mode,
+            centurion_required_assets: self.centurion_required_assets.clone(),
+            centurion_assets_ok: self.centurion_assets_ok,
             default_profile: self.default_profile.clone(),
         }
+    }
+
+    pub fn startup_validation_error(&self) -> Option<String> {
+        self.startup_validation_error.clone()
     }
 
     pub fn select_move(&self, state: &GameState) -> Result<Option<Move>, AiError> {
@@ -324,9 +395,9 @@ impl AIAgent {
         match profile.backend {
             AiBackend::Heuristic => self.heuristic.select_move(state, &profile, deadline),
             AiBackend::Centurion => self.centurion.select_move(state, &profile, deadline),
-            AiBackend::Alphazero => {
-                if self.alphazero.available() {
-                    self.alphazero.select_move(state, &profile, deadline)
+            AiBackend::Abaddon => {
+                if self.abaddon.available() {
+                    self.abaddon.select_move(state, &profile, deadline)
                 } else {
                     Err(AiError::ModelUnavailable)
                 }
@@ -337,7 +408,7 @@ impl AIAgent {
 
 fn parse_default_backend(token: &str) -> AiBackend {
     match token.to_ascii_lowercase().as_str() {
-        "alphazero" | "alpha_zero" | "az" => AiBackend::Alphazero,
+        "abaddon" => AiBackend::Abaddon,
         "centurion" | "stockfish" => AiBackend::Centurion,
         _ => AiBackend::Heuristic,
     }
@@ -347,6 +418,34 @@ fn scaled_move_time_ms(base_ms: u64, skill: u8) -> u64 {
     let base = base_ms.max(1) as f32;
     let mult = 0.35 + (skill.clamp(1, 20) as f32 / 20.0) * 1.05;
     (base * mult).round().max(1.0) as u64
+}
+
+fn runtime_default_threads() -> usize {
+    let avail = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1);
+    if let Ok(v) = std::env::var("PARCAE_CENTURION_THREADS") {
+        if let Ok(parsed) = v.parse::<usize>() {
+            return parsed.clamp(1, avail);
+        }
+    }
+    let render_env = std::env::var("RENDER")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+        || std::env::var("RENDER_SERVICE_ID").is_ok();
+    if render_env {
+        1
+    } else {
+        avail
+    }
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => default,
+    }
 }
 
 fn effective_max_depth(profile: &AiProfile) -> u8 {
@@ -452,7 +551,7 @@ fn heuristic_move(state: &GameState) -> Option<Move> {
     Some(best_move)
 }
 
-// ---------------- AlphaZero backend ----------------
+// ---------------- Abaddon backend ----------------
 
 #[derive(Debug, Clone)]
 struct MctsNode {
@@ -534,16 +633,16 @@ fn mcts_ucb(child: &MctsNode, c_puct: f32, total_visits: f32) -> f32 {
     q + u
 }
 
-struct AlphaZeroAgent {
+struct AbaddonAgent {
     simulations: usize,
     c_puct: f32,
     #[cfg(feature = "onnx")]
     evaluator: Option<OnnxEvaluator>,
 }
 
-impl fmt::Debug for AlphaZeroAgent {
+impl fmt::Debug for AbaddonAgent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AlphaZeroAgent")
+        f.debug_struct("AbaddonAgent")
             .field("simulations", &self.simulations)
             .field("c_puct", &self.c_puct)
             .field("available", &self.available())
@@ -551,7 +650,7 @@ impl fmt::Debug for AlphaZeroAgent {
     }
 }
 
-impl AlphaZeroAgent {
+impl AbaddonAgent {
     fn new(_model_path: Option<PathBuf>, simulations: usize, c_puct: f32) -> Self {
         #[cfg(feature = "onnx")]
         let evaluator = _model_path.as_ref().and_then(|p| {
@@ -559,14 +658,14 @@ impl AlphaZeroAgent {
                 Ok(Ok(eval)) => Some(eval),
                 Ok(Err(err)) => {
                     eprintln!(
-                        "Failed to initialize AlphaZero ONNX evaluator from {}: {err}",
+                        "Failed to initialize Abaddon ONNX evaluator from {}: {err}",
                         p.display()
                     );
                     None
                 }
                 Err(_) => {
                     eprintln!(
-                        "ONNX runtime initialization panicked for {}; AlphaZero disabled",
+                        "ONNX runtime initialization panicked for {}; Abaddon disabled",
                         p.display()
                     );
                     None
@@ -593,20 +692,35 @@ impl AlphaZeroAgent {
         }
     }
 
-    fn evaluate(&self, _state: &GameState) -> (Vec<f32>, f32) {
+    fn evaluate(&self, _state: &GameState) -> Result<(Vec<f32>, f32), AiError> {
         #[cfg(feature = "onnx")]
         {
-            if let Some(eval) = &self.evaluator {
-                if let Ok((p, v)) = eval.policy_value(_state) {
-                    return (p, v);
-                }
+            let Some(eval) = &self.evaluator else {
+                return Err(AiError::ModelUnavailable);
+            };
+            let (p, v) = eval
+                .policy_value(_state)
+                .map_err(|e| AiError::Io(format!("abaddon ONNX evaluation failed: {e}")))?;
+            if p.len() != ALL_MOVES.len() {
+                return Err(AiError::Io(format!(
+                    "abaddon policy output length mismatch: got {}, expected {}",
+                    p.len(),
+                    ALL_MOVES.len()
+                )));
             }
+            if !v.is_finite() {
+                return Err(AiError::Io("abaddon value output is non-finite".to_string()));
+            }
+            return Ok((p, v));
         }
-        (vec![1.0; ALL_MOVES.len()], 0.0)
+        #[cfg(not(feature = "onnx"))]
+        {
+            Err(AiError::ModelUnavailable)
+        }
     }
 }
 
-impl MoveSelector for AlphaZeroAgent {
+impl MoveSelector for AbaddonAgent {
     fn select_move(
         &self,
         state: &GameState,
@@ -626,7 +740,7 @@ impl MoveSelector for AlphaZeroAgent {
         let sims_scale = (profile.skill.clamp(1, 20) as f32 / 12.0).max(0.4);
         let sim_budget = ((self.simulations as f32) * sims_scale).round().max(8.0) as usize;
 
-        let (policy, _value) = self.evaluate(state);
+        let (policy, _value) = self.evaluate(state)?;
         let mut root = MctsNode::new(state.clone(), 1.0);
         root.expand(&policy, &legal_root);
 
@@ -654,7 +768,7 @@ impl MoveSelector for AlphaZeroAgent {
                 if legal.is_empty() {
                     -1.0
                 } else {
-                    let (p, v) = self.evaluate(&node.state);
+                    let (p, v) = self.evaluate(&node.state)?;
                     node.expand(&p, &legal);
                     v
                 }
@@ -687,7 +801,7 @@ impl MoveSelector for AlphaZeroAgent {
         Ok(AiSelection {
             mv: move_from_index(best_idx),
             meta: AiMoveMeta {
-                backend: AiBackend::Alphazero,
+                backend: AiBackend::Abaddon,
                 depth_reached: 1,
                 nodes,
                 nps,
@@ -832,7 +946,8 @@ pub fn save_nnue_weights(path: &Path, weights: &NnueWeights) -> Result<(), AiErr
 
 pub fn load_nnue_weights(path: &Path) -> Result<NnueWeights, AiError> {
     let bytes = fs::read(path).map_err(|e| AiError::Io(e.to_string()))?;
-    let weights: NnueWeights = bincode::deserialize(&bytes).map_err(|e| AiError::Io(e.to_string()))?;
+    let weights: NnueWeights =
+        bincode::deserialize(&bytes).map_err(|e| AiError::Io(e.to_string()))?;
     if weights.input_size != NNUE_INPUT_SIZE {
         return Err(AiError::InvalidProfile(format!(
             "nnue input mismatch: got {}, expected {}",
@@ -983,6 +1098,102 @@ struct TtEntry {
     best_move_idx: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TtSlot {
+    key: u64,
+    entry: TtEntry,
+    generation: u16,
+}
+
+#[derive(Debug, Clone)]
+struct TranspositionTable {
+    clusters: Vec<[Option<TtSlot>; 4]>,
+    generation: u16,
+}
+
+impl TranspositionTable {
+    fn new(hash_mb: usize) -> Self {
+        let bytes = hash_mb.max(1) * 1024 * 1024;
+        let cluster_size = std::mem::size_of::<[Option<TtSlot>; 4]>().max(1);
+        let cluster_count = (bytes / cluster_size).max(1024);
+        Self {
+            clusters: vec![[None; 4]; cluster_count],
+            generation: 1,
+        }
+    }
+
+    fn next_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.generation = 1;
+        }
+    }
+
+    fn index(&self, key: u64) -> usize {
+        let mixed = key.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        (mixed as usize) % self.clusters.len().max(1)
+    }
+
+    fn probe(&self, key: u64) -> Option<TtSlot> {
+        let idx = self.index(key);
+        self.clusters[idx]
+            .iter()
+            .copied()
+            .flatten()
+            .find(|slot| slot.key == key)
+    }
+
+    fn store(&mut self, key: u64, entry: TtEntry) {
+        let idx = self.index(key);
+        let cluster = &mut self.clusters[idx];
+
+        for slot in cluster.iter_mut() {
+            if let Some(existing) = slot {
+                if existing.key == key {
+                    if entry.depth >= existing.entry.depth || matches!(entry.bound, Bound::Exact) {
+                        *slot = Some(TtSlot {
+                            key,
+                            entry,
+                            generation: self.generation,
+                        });
+                    }
+                    return;
+                }
+            }
+        }
+
+        if let Some(slot) = cluster.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(TtSlot {
+                key,
+                entry,
+                generation: self.generation,
+            });
+            return;
+        }
+
+        let mut replace_idx = 0usize;
+        let mut replace_depth = i32::MAX;
+        let mut replace_age = i32::MIN;
+        for (i, slot) in cluster.iter().enumerate() {
+            if let Some(existing) = slot {
+                let age = self.generation.wrapping_sub(existing.generation) as i32;
+                if existing.entry.depth < replace_depth
+                    || (existing.entry.depth == replace_depth && age > replace_age)
+                {
+                    replace_idx = i;
+                    replace_depth = existing.entry.depth;
+                    replace_age = age;
+                }
+            }
+        }
+        cluster[replace_idx] = Some(TtSlot {
+            key,
+            entry,
+            generation: self.generation,
+        });
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct SearchStats {
     nodes: u64,
@@ -993,13 +1204,13 @@ struct SearchStats {
 
 #[derive(Debug)]
 struct SearchContext {
-    tt: HashMap<u64, TtEntry>,
+    tt: TranspositionTable,
     history: HashMap<usize, i32>,
     killers: Vec<[Option<usize>; 2]>,
     stats: SearchStats,
     deadline: Instant,
-    aborted: bool,
     nnue: Option<NnueEvaluator>,
+    threads: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1013,21 +1224,37 @@ struct ScoredMove {
 
 impl SearchContext {
     fn with_profile(profile: &AiProfile, deadline: Instant, nnue: Option<NnueEvaluator>) -> Self {
-        let approx_entry_size = std::mem::size_of::<(u64, TtEntry)>().max(24);
-        let capacity = (profile.hash_mb.max(1) * 1024 * 1024) / approx_entry_size;
         Self {
-            tt: HashMap::with_capacity(capacity.max(1024)),
+            tt: TranspositionTable::new(profile.hash_mb),
             history: HashMap::new(),
             killers: vec![[None, None]; MAX_SEARCH_PLY],
             stats: SearchStats::default(),
             deadline,
-            aborted: false,
             nnue,
+            threads: profile.threads.max(1),
         }
     }
 
     fn timeout(&self) -> bool {
         Instant::now() >= self.deadline
+    }
+
+    fn decay_history(&mut self) {
+        for value in self.history.values_mut() {
+            *value = (*value * 7) / 8;
+        }
+    }
+
+    fn worker_from(parent: &SearchContext, profile: &AiProfile) -> Self {
+        let worker_threads = profile.threads.max(1);
+        let mut per_worker = profile.clone();
+        per_worker.threads = 1;
+        per_worker.hash_mb = (profile.hash_mb / worker_threads).max(1);
+        let mut out =
+            SearchContext::with_profile(&per_worker, parent.deadline, parent.nnue.clone());
+        out.history = parent.history.clone();
+        out.killers = parent.killers.clone();
+        out
     }
 }
 
@@ -1120,7 +1347,7 @@ impl MoveSelector for CenturionAgent {
                 if ctx.timeout() {
                     break;
                 }
-                match centurion_root_search(state, depth, alpha, beta, &mut ctx) {
+                match centurion_root_search_dispatch(state, depth, alpha, beta, &mut ctx, profile) {
                     Ok((score, mv)) => {
                         best_move = Some(mv);
                         aspiration_center = score;
@@ -1132,6 +1359,28 @@ impl MoveSelector for CenturionAgent {
                             continue;
                         }
                         if score >= beta {
+                            // Verify unstable fail-highs with a wider bound before widening aspiration.
+                            if depth >= 4 && !ctx.timeout() {
+                                match centurion_root_search_dispatch(
+                                    state,
+                                    depth,
+                                    beta - 1,
+                                    MATE_SCORE,
+                                    &mut ctx,
+                                    profile,
+                                ) {
+                                    Ok((verified_score, verified_mv)) => {
+                                        best_move = Some(verified_mv);
+                                        aspiration_center = verified_score;
+                                        if verified_score < beta {
+                                            resolved = true;
+                                            break;
+                                        }
+                                    }
+                                    Err(AiError::SearchAborted) => {}
+                                    Err(err) => return Err(err),
+                                }
+                            }
                             beta += 200;
                             alpha = ((alpha + beta) / 2).min(beta - 1);
                             resolved = false;
@@ -1146,6 +1395,8 @@ impl MoveSelector for CenturionAgent {
 
             if resolved {
                 ctx.stats.depth_reached = depth as u8;
+                ctx.tt.next_generation();
+                ctx.decay_history();
             }
 
             if ctx.timeout() {
@@ -1153,7 +1404,12 @@ impl MoveSelector for CenturionAgent {
             }
         }
 
-        let mv = best_move.or_else(|| heuristic_move(state));
+        let mv = best_move.or_else(|| centurion_emergency_move(state, &ctx));
+        let source = if best_move.is_some() {
+            AiMoveSource::Search
+        } else {
+            AiMoveSource::Emergency
+        };
         let elapsed = started.elapsed();
         let secs = elapsed.as_secs_f64();
         let nps = if secs > 0.0 {
@@ -1176,10 +1432,145 @@ impl MoveSelector for CenturionAgent {
                 nps,
                 tt_hit_rate,
                 time_ms: elapsed.as_millis() as u64,
-                source: AiMoveSource::Search,
+                source,
             },
         })
     }
+}
+
+fn centurion_root_search_dispatch(
+    state: &GameState,
+    depth: i32,
+    alpha: i32,
+    beta: i32,
+    ctx: &mut SearchContext,
+    profile: &AiProfile,
+) -> Result<(i32, Move), AiError> {
+    if ctx.threads <= 1 {
+        return centurion_root_search(state, depth, alpha, beta, ctx);
+    }
+    centurion_root_search_parallel(state, depth, alpha, beta, ctx, profile)
+}
+
+fn centurion_emergency_move(state: &GameState, ctx: &SearchContext) -> Option<Move> {
+    let hash = zobrist_hash(state);
+    let tt_move = ctx.tt.probe(hash).and_then(|slot| slot.entry.best_move_idx);
+    if let Ok(scored) = ordered_moves(state, tt_move, 0, ctx) {
+        if let Some(first) = scored.first() {
+            return Some(first.mv);
+        }
+    }
+    let mut legal = list_legal_moves(state);
+    legal.sort_by_key(|mv| move_index(*mv).unwrap_or(usize::MAX));
+    legal.into_iter().next()
+}
+
+fn centurion_root_search_parallel(
+    state: &GameState,
+    depth: i32,
+    alpha: i32,
+    beta: i32,
+    ctx: &mut SearchContext,
+    profile: &AiProfile,
+) -> Result<(i32, Move), AiError> {
+    if ctx.timeout() {
+        return Err(AiError::SearchAborted);
+    }
+    let hash = zobrist_hash(state);
+    let tt_move = ctx.tt.probe(hash).and_then(|slot| slot.entry.best_move_idx);
+    let scored = ordered_moves(state, tt_move, 0, ctx)?;
+    if scored.is_empty() {
+        return Err(AiError::NoLegalMoves);
+    }
+    if scored.len() < 2 {
+        return centurion_root_search(state, depth, alpha, beta, ctx);
+    }
+
+    let worker_profile = {
+        let mut p = profile.clone();
+        p.threads = 1;
+        p.hash_mb = (profile.hash_mb / profile.threads.max(1)).max(1);
+        p
+    };
+
+    let eval_parallel = || {
+        scored
+            .par_iter()
+            .enumerate()
+            .map(|(order, sm)| {
+                let mut worker_ctx = SearchContext::worker_from(ctx, &worker_profile);
+                let score = if worker_ctx.timeout() {
+                    Err(AiError::SearchAborted)
+                } else {
+                    match apply_move(state, sm.mv) {
+                        Ok(next) => centurion_negamax(
+                            &next,
+                            depth - 1,
+                            -beta,
+                            -alpha,
+                            1,
+                            &mut worker_ctx,
+                            true,
+                        )
+                        .map(|s| -s),
+                        Err(err) => Err(AiError::Io(err.to_string())),
+                    }
+                };
+                (order, *sm, score, worker_ctx.stats)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let workers = if let Ok(pool) = rayon::ThreadPoolBuilder::new()
+        .num_threads(profile.threads.max(1))
+        .build()
+    {
+        pool.install(eval_parallel)
+    } else {
+        eval_parallel()
+    };
+
+    let mut best: Option<(i32, Move, usize)> = None;
+    for (order, sm, score, stats) in workers {
+        ctx.stats.nodes = ctx.stats.nodes.saturating_add(stats.nodes);
+        ctx.stats.tt_probes = ctx.stats.tt_probes.saturating_add(stats.tt_probes);
+        ctx.stats.tt_hits = ctx.stats.tt_hits.saturating_add(stats.tt_hits);
+
+        let Ok(score) = score else {
+            continue;
+        };
+        match best {
+            None => best = Some((score, sm.mv, order)),
+            Some((best_score, best_move, best_order)) => {
+                let lhs = (score, -(order as i32));
+                let rhs = (best_score, -(best_order as i32));
+                if lhs > rhs || (lhs == rhs && move_index(sm.mv) < move_index(best_move)) {
+                    best = Some((score, sm.mv, order));
+                }
+            }
+        }
+    }
+
+    let Some((best_score, best_move, _)) = best else {
+        return Err(AiError::SearchAborted);
+    };
+
+    ctx.tt.store(
+        hash,
+        TtEntry {
+            depth,
+            score: best_score,
+            bound: if best_score <= alpha {
+                Bound::Upper
+            } else if best_score >= beta {
+                Bound::Lower
+            } else {
+                Bound::Exact
+            },
+            best_move_idx: move_index(best_move),
+        },
+    );
+    Ok((best_score, best_move))
 }
 
 fn centurion_root_search(
@@ -1193,12 +1584,13 @@ fn centurion_root_search(
         return Err(AiError::SearchAborted);
     }
     let hash = zobrist_hash(state);
-    let tt_move = ctx.tt.get(&hash).and_then(|e| e.best_move_idx);
+    let tt_move = ctx.tt.probe(hash).and_then(|slot| slot.entry.best_move_idx);
     let mut moves = ordered_moves(state, tt_move, 0, ctx)?;
     if moves.is_empty() {
         return Err(AiError::NoLegalMoves);
     }
 
+    let alpha_orig = alpha;
     let mut best_score = -MATE_SCORE;
     let mut best_move = moves[0].mv;
 
@@ -1208,12 +1600,12 @@ fn centurion_root_search(
         }
         let next = apply_move(state, sm.mv).map_err(|e| AiError::Io(e.to_string()))?;
         let score = if i == 0 {
-            -centurion_negamax(&next, depth - 1, -beta, -alpha, 1, ctx)?
+            -centurion_negamax(&next, depth - 1, -beta, -alpha, 1, ctx, true)?
         } else {
             // PVS null-window search first.
-            let mut s = -centurion_negamax(&next, depth - 1, -alpha - 1, -alpha, 1, ctx)?;
+            let mut s = -centurion_negamax(&next, depth - 1, -alpha - 1, -alpha, 1, ctx, true)?;
             if s > alpha && s < beta {
-                s = -centurion_negamax(&next, depth - 1, -beta, -alpha, 1, ctx)?;
+                s = -centurion_negamax(&next, depth - 1, -beta, -alpha, 1, ctx, true)?;
             }
             s
         };
@@ -1230,12 +1622,12 @@ fn centurion_root_search(
         }
     }
 
-    ctx.tt.insert(
+    ctx.tt.store(
         hash,
         TtEntry {
             depth,
             score: best_score,
-            bound: if best_score <= alpha {
+            bound: if best_score <= alpha_orig {
                 Bound::Upper
             } else if best_score >= beta {
                 Bound::Lower
@@ -1256,9 +1648,9 @@ fn centurion_negamax(
     beta: i32,
     ply: usize,
     ctx: &mut SearchContext,
+    allow_null: bool,
 ) -> Result<i32, AiError> {
     if ctx.timeout() {
-        ctx.aborted = true;
         return Err(AiError::SearchAborted);
     }
     ctx.stats.nodes += 1;
@@ -1276,10 +1668,38 @@ fn centurion_negamax(
         return centurion_quiescence(state, alpha, beta, ply, ctx);
     }
 
+    let static_eval = blended_eval(state, ctx.nnue.as_ref());
+    if depth <= 2 {
+        let razor_margin = 140 + depth * 80;
+        if static_eval + razor_margin < alpha {
+            return centurion_quiescence(state, alpha, beta, ply, ctx);
+        }
+    }
+
+    if allow_null && depth >= 3 && !zugzwang_risk(state) && static_eval >= beta - 60 {
+        let mut null_state = state.clone();
+        null_state.turn = state.turn.opponent();
+        let reduction = (2 + (depth / 4)).min(depth - 1);
+        let null_depth = (depth - 1 - reduction).max(0);
+        let null_score = -centurion_negamax(
+            &null_state,
+            null_depth,
+            -beta,
+            -beta + 1,
+            ply + 1,
+            ctx,
+            false,
+        )?;
+        if null_score >= beta {
+            return Ok(null_score);
+        }
+    }
+
     let hash = zobrist_hash(state);
     let mut tt_move = None;
-    if let Some(entry) = ctx.tt.get(&hash) {
+    if let Some(slot) = ctx.tt.probe(hash) {
         ctx.stats.tt_probes += 1;
+        let entry = slot.entry;
         tt_move = entry.best_move_idx;
         if entry.depth >= depth {
             ctx.stats.tt_hits += 1;
@@ -1312,16 +1732,43 @@ fn centurion_negamax(
     let mut best_move_idx = None;
 
     for (i, sm) in moves.drain(..).enumerate() {
+        if ctx.timeout() {
+            return Err(AiError::SearchAborted);
+        }
+        let quiet = sm.capture_gain <= 0 && !sm.winning;
+        let is_pv = i == 0;
+        if !is_pv && quiet && depth <= 3 && i >= lmp_limit(depth) {
+            continue;
+        }
+        if quiet && depth <= 2 && static_eval + futility_margin(depth) <= alpha {
+            continue;
+        }
+
         let next = apply_move(state, sm.mv).map_err(|e| AiError::Io(e.to_string()))?;
-        let score = if i == 0 {
-            -centurion_negamax(&next, depth - 1, -beta, -alpha, ply + 1, ctx)?
+        let mut reduced_depth = depth - 1;
+        let mut reduced = false;
+        if !is_pv && quiet && depth >= 3 && i >= 3 {
+            let red = lmr_reduction(depth, i);
+            if red > 0 {
+                reduced_depth = (depth - 1 - red).max(0);
+                reduced = true;
+            }
+        }
+
+        let mut score = if is_pv {
+            -centurion_negamax(&next, depth - 1, -beta, -alpha, ply + 1, ctx, true)?
         } else {
-            let mut s = -centurion_negamax(&next, depth - 1, -alpha - 1, -alpha, ply + 1, ctx)?;
+            let mut s =
+                -centurion_negamax(&next, reduced_depth, -alpha - 1, -alpha, ply + 1, ctx, true)?;
             if s > alpha && s < beta {
-                s = -centurion_negamax(&next, depth - 1, -beta, -alpha, ply + 1, ctx)?;
+                s = -centurion_negamax(&next, depth - 1, -beta, -alpha, ply + 1, ctx, true)?;
             }
             s
         };
+
+        if reduced && score > alpha {
+            score = -centurion_negamax(&next, depth - 1, -beta, -alpha, ply + 1, ctx, true)?;
+        }
 
         if score > best_score {
             best_score = score;
@@ -1352,7 +1799,7 @@ fn centurion_negamax(
         Bound::Exact
     };
 
-    ctx.tt.insert(
+    ctx.tt.store(
         hash,
         TtEntry {
             depth,
@@ -1363,6 +1810,46 @@ fn centurion_negamax(
     );
 
     Ok(best_score)
+}
+
+fn zugzwang_risk(state: &GameState) -> bool {
+    let piece_count = state.board.len();
+    let soldiers = state
+        .board
+        .values()
+        .filter(|p| p.kind == PieceType::Soldier)
+        .count();
+    piece_count <= 7 || soldiers <= 2
+}
+
+fn futility_margin(depth: i32) -> i32 {
+    match depth {
+        d if d <= 0 => 0,
+        1 => 130,
+        _ => 230,
+    }
+}
+
+fn lmp_limit(depth: i32) -> usize {
+    match depth {
+        d if d <= 1 => 4,
+        2 => 8,
+        _ => 14,
+    }
+}
+
+fn lmr_reduction(depth: i32, move_index: usize) -> i32 {
+    if depth <= 2 || move_index < 3 {
+        return 0;
+    }
+    let mut red = 1;
+    if depth >= 6 {
+        red += 1;
+    }
+    if move_index >= 8 {
+        red += 1;
+    }
+    red.min(depth - 1).max(0)
 }
 
 fn centurion_quiescence(
@@ -1395,7 +1882,12 @@ fn centurion_quiescence(
             if gain <= 0 && !winning {
                 return None;
             }
-            let score = if winning { 1_000_000 } else { gain * 10_000 };
+            let mvv_lva = capture_mvv_lva(state, mv);
+            let score = if winning {
+                2_000_000 + mvv_lva * 1_000
+            } else {
+                gain * 150_000 + mvv_lva * 8_000
+            };
             Some(ScoredMove {
                 mv,
                 idx,
@@ -1409,6 +1901,15 @@ fn centurion_quiescence(
     tactical.sort_by(|a, b| b.score.cmp(&a.score));
 
     for sm in tactical {
+        if ctx.timeout() {
+            return Err(AiError::SearchAborted);
+        }
+        if !sm.winning {
+            let optimistic = stand_pat + optimistic_tactical_gain_cp(state, sm.mv, sm.capture_gain);
+            if optimistic + 80 <= alpha {
+                continue;
+            }
+        }
         let next = apply_move(state, sm.mv).map_err(|e| AiError::Io(e.to_string()))?;
         let score = -centurion_quiescence(&next, -beta, -alpha, ply + 1, ctx)?;
         if score >= beta {
@@ -1443,6 +1944,7 @@ fn ordered_moves(
         let idx = move_index(mv).ok_or_else(|| AiError::Io("move index missing".to_string()))?;
         let gain = move_capture_gain(state, mv);
         let winning = is_winning_move(state, mv);
+        let mvv_lva = capture_mvv_lva(state, mv);
         let mut score = 0;
         if Some(idx) == tt_move {
             score += 10_000_000;
@@ -1451,7 +1953,9 @@ fn ordered_moves(
             score += 5_000_000;
         }
         if gain > 0 {
-            score += 3_000_000 + gain * 50_000;
+            score += 3_000_000 + gain * 120_000 + mvv_lva * 5_000;
+        } else if gain < 0 {
+            score -= 700_000 - mvv_lva * 1_000;
         }
         if Some(idx) == killers[0] {
             score += 100_000;
@@ -1471,6 +1975,36 @@ fn ordered_moves(
 
     scored.sort_by(|a, b| b.score.cmp(&a.score));
     Ok(scored)
+}
+
+fn piece_value(kind: PieceType) -> i32 {
+    match kind {
+        PieceType::Soldier => 100,
+        PieceType::Dux => 1800,
+    }
+}
+
+fn capture_mvv_lva(state: &GameState, mv: Move) -> i32 {
+    let attacker = state
+        .board
+        .get(&mv.origin)
+        .map(|p| piece_value(p.kind))
+        .unwrap_or(100);
+    let victim = state
+        .board
+        .get(&mv.target)
+        .map(|p| piece_value(p.kind))
+        .unwrap_or(0);
+    victim * 16 - attacker
+}
+
+fn optimistic_tactical_gain_cp(state: &GameState, mv: Move, gain: i32) -> i32 {
+    let victim = state
+        .board
+        .get(&mv.target)
+        .map(|p| piece_value(p.kind))
+        .unwrap_or(0);
+    gain.max(0) * 150 + victim / 2
 }
 
 fn terminal_eval(state: &GameState) -> Option<i32> {
@@ -1719,7 +2253,10 @@ mod onnx {
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
             let policy_vec = policy.1.to_vec();
-            let val = *value.1.first().unwrap_or(&0.0);
+            let val = *value
+                .1
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("abaddon value tensor is empty"))?;
             Ok((policy_vec, val))
         }
     }
@@ -1751,6 +2288,10 @@ mod onnx {
 mod tests {
     use super::*;
     use engine::initial_state;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]
     fn heuristic_returns_move() {
@@ -1777,6 +2318,12 @@ mod tests {
             assert!(idx.is_some());
             assert!(idx.unwrap() < ALL_MOVES.len());
         }
+    }
+
+    #[test]
+    fn default_backend_parsing_accepts_abaddon_and_rejects_legacy_name() {
+        assert_eq!(parse_default_backend("abaddon"), AiBackend::Abaddon);
+        assert_eq!(parse_default_backend("alphazero"), AiBackend::Heuristic);
     }
 
     #[test]
@@ -1890,5 +2437,240 @@ mod tests {
         let state = initial_state(5).unwrap();
         let eval = NnueEvaluator::new(Arc::new(loaded)).evaluate_cp(&state);
         assert!(eval.abs() < 200_000);
+    }
+
+    #[test]
+    fn centurion_never_reports_heuristic_source() {
+        let state = initial_state(5).unwrap();
+        let mut profile = AiProfile::default();
+        profile.backend = AiBackend::Centurion;
+        profile.use_book = false;
+        profile.use_tb = false;
+        profile.move_time_ms = 1;
+        profile.max_depth = 2;
+        profile.threads = 1;
+
+        let agent = AIAgent::default();
+        let selection = agent.select_move_with_profile(&state, &profile).unwrap();
+        assert!(selection.mv.is_some());
+        assert!(matches!(
+            selection.meta.source,
+            AiMoveSource::Search | AiMoveSource::Emergency
+        ));
+    }
+
+    #[test]
+    fn strict_mode_requires_assets() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let keys = [
+            "PARCAE_CENTURION_STRICT",
+            "PARCAE_CENTURION_REQUIRE_BOOK",
+            "PARCAE_CENTURION_REQUIRE_TB",
+            "PARCAE_CENTURION_REQUIRE_NNUE",
+            "PARCAE_BOOK_PATH",
+            "PARCAE_TB_PATH",
+            "PARCAE_NNUE_PATH",
+        ];
+        let mut previous: HashMap<&str, Option<String>> = HashMap::new();
+        for key in keys {
+            previous.insert(key, std::env::var(key).ok());
+        }
+
+        std::env::set_var("PARCAE_CENTURION_STRICT", "1");
+        std::env::set_var("PARCAE_CENTURION_REQUIRE_BOOK", "1");
+        std::env::set_var("PARCAE_CENTURION_REQUIRE_TB", "1");
+        std::env::set_var("PARCAE_CENTURION_REQUIRE_NNUE", "1");
+        std::env::set_var("PARCAE_BOOK_PATH", "/tmp/parcae_missing_book.bin");
+        std::env::set_var("PARCAE_TB_PATH", "/tmp/parcae_missing_tb.bin");
+        std::env::set_var("PARCAE_NNUE_PATH", "/tmp/parcae_missing_nnue.bin");
+
+        let agent = AIAgent::new(None::<PathBuf>, 64, 1.25);
+        assert!(agent.startup_validation_error().is_some());
+
+        for key in keys {
+            if let Some(Some(value)) = previous.get(key) {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    #[test]
+    fn strict_mode_accepts_valid_assets() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let keys = [
+            "PARCAE_CENTURION_STRICT",
+            "PARCAE_CENTURION_REQUIRE_BOOK",
+            "PARCAE_CENTURION_REQUIRE_TB",
+            "PARCAE_CENTURION_REQUIRE_NNUE",
+            "PARCAE_BOOK_PATH",
+            "PARCAE_TB_PATH",
+            "PARCAE_NNUE_PATH",
+        ];
+        let mut previous: HashMap<&str, Option<String>> = HashMap::new();
+        for key in keys {
+            previous.insert(key, std::env::var(key).ok());
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp = std::env::temp_dir();
+        let book_path = tmp.join(format!("parcae_book_ok_{unique}.bin"));
+        let tb_path = tmp.join(format!("parcae_tb_ok_{unique}.bin"));
+        let nnue_path = tmp.join(format!("parcae_nnue_ok_{unique}.bin"));
+
+        save_book_artifact(
+            &book_path,
+            &BookArtifact {
+                version: 1,
+                entries: Vec::new(),
+            },
+        )
+        .unwrap();
+        save_tablebase_artifact(
+            &tb_path,
+            &TablebaseArtifact {
+                version: 1,
+                max_pieces: 4,
+                entries: Vec::new(),
+            },
+        )
+        .unwrap();
+        save_nnue_weights(&nnue_path, &NnueWeights::new_random(64, 999)).unwrap();
+
+        std::env::set_var("PARCAE_CENTURION_STRICT", "1");
+        std::env::set_var("PARCAE_CENTURION_REQUIRE_BOOK", "1");
+        std::env::set_var("PARCAE_CENTURION_REQUIRE_TB", "1");
+        std::env::set_var("PARCAE_CENTURION_REQUIRE_NNUE", "1");
+        std::env::set_var("PARCAE_BOOK_PATH", book_path.to_string_lossy().as_ref());
+        std::env::set_var("PARCAE_TB_PATH", tb_path.to_string_lossy().as_ref());
+        std::env::set_var("PARCAE_NNUE_PATH", nnue_path.to_string_lossy().as_ref());
+
+        let agent = AIAgent::new(None::<PathBuf>, 64, 1.25);
+        assert!(agent.startup_validation_error().is_none());
+        let caps = agent.capabilities();
+        assert!(caps.centurion_assets_ok);
+        assert!(caps.centurion_book_loaded);
+        assert!(caps.centurion_tb_loaded);
+        assert!(caps.centurion_nnue_loaded);
+
+        let _ = fs::remove_file(book_path);
+        let _ = fs::remove_file(tb_path);
+        let _ = fs::remove_file(nnue_path);
+        for key in keys {
+            if let Some(Some(value)) = previous.get(key) {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    #[test]
+    fn centurion_deterministic_with_threads_one() {
+        let state = initial_state(5).unwrap();
+        let mut profile = AiProfile::default();
+        profile.backend = AiBackend::Centurion;
+        profile.use_book = false;
+        profile.use_tb = false;
+        profile.move_time_ms = 40;
+        profile.max_depth = 5;
+        profile.threads = 1;
+
+        let agent = AIAgent::default();
+        let a = agent.select_move_with_profile(&state, &profile).unwrap().mv;
+        let b = agent.select_move_with_profile(&state, &profile).unwrap().mv;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn tt_move_ordering_priority() {
+        let state = initial_state(5).unwrap();
+        let mut profile = AiProfile::default();
+        profile.threads = 1;
+        profile.hash_mb = 1;
+        let ctx = SearchContext::with_profile(
+            &profile,
+            Instant::now() + Duration::from_millis(500),
+            None,
+        );
+        let legal = list_legal_moves(&state);
+        assert!(legal.len() > 1);
+        let tt_idx = move_index(legal[1]).unwrap();
+        let ordered = ordered_moves(&state, Some(tt_idx), 0, &ctx).unwrap();
+        assert_eq!(ordered.first().map(|m| m.idx), Some(tt_idx));
+    }
+
+    #[test]
+    fn tt_replaces_shallow_with_exact_and_keeps_new_entry() {
+        let mut tt = TranspositionTable::new(1);
+        let key = 0x1234_5678_ABCD_EF00u64;
+        tt.store(
+            key,
+            TtEntry {
+                depth: 6,
+                score: 11,
+                bound: Bound::Lower,
+                best_move_idx: Some(1),
+            },
+        );
+        tt.store(
+            key,
+            TtEntry {
+                depth: 3,
+                score: 7,
+                bound: Bound::Upper,
+                best_move_idx: Some(2),
+            },
+        );
+        assert_eq!(tt.probe(key).unwrap().entry.depth, 6);
+
+        tt.store(
+            key,
+            TtEntry {
+                depth: 2,
+                score: 5,
+                bound: Bound::Exact,
+                best_move_idx: Some(3),
+            },
+        );
+        assert_eq!(tt.probe(key).unwrap().entry.best_move_idx, Some(3));
+
+        let idx = tt.index(key);
+        let mut collisions = Vec::new();
+        let mut candidate = key.wrapping_add(1);
+        while collisions.len() < 4 {
+            if tt.index(candidate) == idx && candidate != key {
+                collisions.push(candidate);
+            }
+            candidate = candidate.wrapping_add(1);
+        }
+
+        for c in &collisions {
+            tt.store(
+                *c,
+                TtEntry {
+                    depth: 4,
+                    score: 1,
+                    bound: Bound::Exact,
+                    best_move_idx: None,
+                },
+            );
+        }
+        tt.next_generation();
+        let replacement_key = candidate;
+        tt.store(
+            replacement_key,
+            TtEntry {
+                depth: 4,
+                score: 2,
+                bound: Bound::Exact,
+                best_move_idx: None,
+            },
+        );
+        assert!(tt.probe(replacement_key).is_some());
     }
 }

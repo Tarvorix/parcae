@@ -63,6 +63,60 @@ def main(argv=None) -> int:
         default=20,
         help="After this many plies, self-play switches to greedy move selection (default: 20).",
     )
+    parser.add_argument(
+        "--ai-d-model",
+        type=int,
+        default=128,
+        help="Abaddon transformer embedding width (default: 128).",
+    )
+    parser.add_argument(
+        "--ai-layers",
+        type=int,
+        default=8,
+        help="Abaddon transformer encoder depth (default: 8).",
+    )
+    parser.add_argument(
+        "--ai-heads",
+        type=int,
+        default=4,
+        help="Abaddon transformer attention heads (default: 4).",
+    )
+    parser.add_argument(
+        "--ai-ffn-dim",
+        type=int,
+        default=384,
+        help="Abaddon transformer FFN hidden width (default: 384).",
+    )
+    parser.add_argument(
+        "--ai-dropout",
+        type=float,
+        default=0.1,
+        help="Abaddon transformer dropout rate (default: 0.1).",
+    )
+    parser.add_argument(
+        "--ai-lr",
+        type=float,
+        default=1e-3,
+        help="Training learning rate (default: 1e-3).",
+    )
+    parser.add_argument(
+        "--ai-warmup-steps",
+        type=int,
+        default=50,
+        help="Learning-rate warmup optimizer steps (default: 50).",
+    )
+    parser.add_argument(
+        "--ai-progress-every",
+        type=int,
+        default=10,
+        help="Print training status every N self-play games (default: 10, 0 disables).",
+    )
+    parser.add_argument(
+        "--ai-checkpoint-every",
+        type=int,
+        default=0,
+        help="Write an interval checkpoint every N self-play games (default: 0, disabled).",
+    )
     args = parser.parse_args(argv)
 
     if args.version:
@@ -84,6 +138,15 @@ def main(argv=None) -> int:
             self_play_max_plies=args.ai_max_plies,
             temperature_drop_plies=args.ai_temp_drop_plies,
             out_path=args.ai_checkpoint,
+            d_model=args.ai_d_model,
+            layers=args.ai_layers,
+            heads=args.ai_heads,
+            ffn_dim=args.ai_ffn_dim,
+            dropout=args.ai_dropout,
+            lr=args.ai_lr,
+            warmup_steps=args.ai_warmup_steps,
+            progress_every=args.ai_progress_every,
+            checkpoint_every=args.ai_checkpoint_every,
         )
         print(f"Checkpoint written to {path}")
         return 0

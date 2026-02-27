@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import os
+import time
 from dataclasses import dataclass, field
 from typing import List
 
@@ -14,7 +16,7 @@ except ImportError:  # pragma: no cover - torch optional
     optim = None
 
 from .agent import AIAgent, MOVE_TO_INDEX
-from .model import ParcaeNet
+from .model import AbaddonConfig, build_checkpoint_payload, create_abaddon_model
 from .selfplay import Experience, self_play_game
 
 
@@ -44,6 +46,15 @@ def train_self_play(
     self_play_max_plies: int = 256,
     temperature_drop_plies: int = 20,
     out_path: str = "checkpoints/parcae_latest.pt",
+    d_model: int = 128,
+    layers: int = 8,
+    heads: int = 4,
+    ffn_dim: int = 384,
+    dropout: float = 0.1,
+    lr: float = 1e-3,
+    warmup_steps: int = 50,
+    progress_every: int = 10,
+    checkpoint_every: int = 0,
 ) -> str:
     """Run self-play + training loop and write a checkpoint."""
     if torch is None:
@@ -51,18 +62,54 @@ def train_self_play(
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     buffer = ReplayBuffer(capacity=10_000)
-    model = ParcaeNet(channels=64, blocks=4, move_space=len(MOVE_TO_INDEX)).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    config = AbaddonConfig(
+        d_model=d_model,
+        layers=layers,
+        heads=heads,
+        ffn_dim=ffn_dim,
+        dropout=dropout,
+    )
+    model = create_abaddon_model(move_space=len(MOVE_TO_INDEX), config=config).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_value = nn.MSELoss()
+    expected_updates = max(1, games * epochs)
+
+    def lr_schedule(step: int) -> float:
+        warmup = max(0, warmup_steps)
+        if warmup > 0 and step < warmup:
+            return float(step + 1) / float(warmup)
+        if expected_updates <= warmup:
+            return 1.0
+        progress = float(step - warmup) / float(expected_updates - warmup)
+        progress = min(1.0, max(0.0, progress))
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_schedule)
 
     agent = AIAgent(model_path=None, device=device, simulations=simulations)
     # Replace the randomly initialized model inside agent
     agent.model = model
     agent.available = True
+    agent.load_error = None
 
-    for _ in range(games):
+    started = time.time()
+    print(
+        "Training start:",
+        {
+            "games": games,
+            "batch_size": batch_size,
+            "epochs": epochs,
+            "device": device,
+            "simulations": simulations,
+            "progress_every": progress_every,
+            "checkpoint_every": checkpoint_every,
+        },
+        flush=True,
+    )
+
+    for game_idx in range(games):
         model.eval()
-        experiences, _winner = self_play_game(
+        experiences, game_result = self_play_game(
             agent,
             temperature=self_play_temperature,
             max_plies=self_play_max_plies,
@@ -86,7 +133,40 @@ def train_self_play(
             lv = loss_value(values.view(-1), target_z)
             loss = lp + lv
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
 
-    torch.save({"model": model.state_dict()}, out_path)
+        should_log = progress_every > 0 and (
+            (game_idx + 1) % progress_every == 0 or (game_idx + 1) == games
+        )
+        if should_log:
+            elapsed = time.time() - started
+            avg_per_game = elapsed / float(game_idx + 1)
+            eta = avg_per_game * float(games - (game_idx + 1))
+            winner_text = game_result.winner.value if game_result.winner is not None else "draw"
+            print(
+                f"[train] game {game_idx + 1}/{games} "
+                f"winner={winner_text} "
+                f"plies={game_result.plies} "
+                f"white_caps={game_result.white_captures} "
+                f"black_caps={game_result.black_captures} "
+                f"end={game_result.end_reason} "
+                f"experiences={len(experiences)} "
+                f"buffer={len(buffer.items)} "
+                f"elapsed={elapsed:.1f}s "
+                f"eta={eta:.1f}s",
+                flush=True,
+            )
+
+        should_checkpoint = checkpoint_every > 0 and (game_idx + 1) % checkpoint_every == 0
+        if should_checkpoint and (game_idx + 1) < games:
+            stem, ext = os.path.splitext(out_path)
+            interval_path = f"{stem}_g{game_idx + 1:05d}{ext or '.pt'}"
+            torch.save(build_checkpoint_payload(model, config), interval_path)
+            print(f"[train] checkpoint saved: {interval_path}", flush=True)
+
+    torch.save(build_checkpoint_payload(model, config), out_path)
+    total_elapsed = time.time() - started
+    print(f"Training complete in {total_elapsed:.1f}s. Checkpoint: {out_path}", flush=True)
     return out_path
