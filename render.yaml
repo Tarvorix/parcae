@@ -2,7 +2,6 @@ services:
   - type: web
     name: parcae-api
     runtime: rust
-    plan: free
     buildCommand: cd rust && cargo build --release -p server
     startCommand: cd rust && ./target/release/server
     healthCheckPath: /health
@@ -15,6 +14,16 @@ services:
         value: 500
       - key: PARCAE_STOCKFISH_DEFAULT_HASH_MB
         value: 128
+      - key: PARCAE_CENTURION_THREADS
+        value: 1
+      - key: PARCAE_CENTURION_STRICT
+        value: "1"
+      - key: PARCAE_CENTURION_REQUIRE_BOOK
+        value: "1"
+      - key: PARCAE_CENTURION_REQUIRE_TB
+        value: "1"
+      - key: PARCAE_CENTURION_REQUIRE_NNUE
+        value: "1"
       - key: PARCAE_MODEL_PATH
         value: /opt/render/project/src/models/rust/parcae_model.onnx
       - key: PARCAE_BOOK_PATH
